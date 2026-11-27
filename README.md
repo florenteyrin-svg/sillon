@@ -69,6 +69,24 @@ Ajoute le fournisseur de musique **Open Subsonic** :
 | Port | `4747` (ou `443` derrière Nginx) |
 | Utilisateur / mot de passe | ceux de `SILLON_ADMIN_USER` / `SILLON_ADMIN_PASSWORD` |
 
+## Appli Android
+
+L'appli est dans [`android/`](android/) (Kotlin, Jetpack Compose, Media3) :
+
+- **Écouter** : reprise de la lecture en cours, récemment écoutés (bibliothèque et Apple Music mélangés),
+  playlists, ajouts récents.
+- **Bibliothèque** : playlists (et intelligentes), artistes, albums, tous les titres, favoris.
+- **Recherche** : ta bibliothèque et Apple Music. Un appui sur un titre Apple Music le lance tout de suite ;
+  la flèche le télécharge dans ta bibliothèque.
+- **Lecture** : logo HI-RES / CD / ATMOS / MP3, pochette animée, file d'attente, aléatoire, répétition.
+- **Toujours prête** : la file d'attente et la position sont gardées sur le téléphone et rechargées avant
+  tout le reste, donc rien à charger en ouvrant l'appli ou en montant en voiture.
+- **Android Auto** : Récents, Playlists, Albums, Artistes, recherche et commande vocale.
+- Lit FLAC, ALAC, MP3, AAC, Opus, WAV… (décodeurs FFmpeg intégrés).
+
+L'APK est publié dans les [Releases](https://github.com/florenteyrin-svg/sillon/releases) quand la clé de
+signature est enregistrée dans les secrets du dépôt (`SILLON_KEYSTORE_B64`, `SILLON_KEYSTORE_PASSWORD`).
+
 ## Pour les curieux
 
 - [docs/architecture.md](docs/architecture.md) : comment c'est construit, l'API, la suite.
@@ -77,7 +95,7 @@ Ajoute le fournisseur de musique **Open Subsonic** :
 ## Feuille de route
 
 1. ~~Serveur : bibliothèque, ajout instantané, Subsonic, à la carte, playlists intelligentes~~
-2. Appli Android (Kotlin) : démarrage instantané, Android Auto, widget vinyle, logo qualité,
-   envoi vers Music Assistant, playlists hors ligne
+2. Appli Android : ~~lecture, bibliothèque, recherche Apple Music, Android Auto, file gardée~~ ;
+   à venir : widget vinyle, envoi vers Music Assistant, playlists hors ligne, paroles
 3. Mix DJ (bouton) : tempo, tonalité, transitions vocales préparées par le serveur
 4. Appli Windows, carte simple pour le mur Home Assistant

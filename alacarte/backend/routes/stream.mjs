@@ -64,7 +64,6 @@ async function start(id, albumId, storefront) {
     },
   })
   await writeStatus(dir, { status: 'running', id, albumId: albumId || null })
-  running.set(id, { startedAt: Date.now() })
   const { waitExit } = spawnAmdp({ args: ['--song', url], cwd: dir, onLine: () => {} })
   waitExit
     .then(async (r) => {
@@ -112,10 +111,13 @@ streamRouter.post('/song/:id', async (req, res) => {
   if (running.size >= MAX_PARALLEL) {
     return res.status(429).json({ error: 'too many songs being prepared, try again in a moment' })
   }
+  // Marked as running before the first await, so two quick requests never start it twice
+  running.set(id, { startedAt: Date.now() })
   try {
     await start(id, req.body?.albumId ? String(req.body.albumId) : null, req.body?.storefront)
     res.status(202).json({ id, status: 'running' })
   } catch (err) {
+    running.delete(id)
     res.status(500).json({ error: err.message })
   }
 })

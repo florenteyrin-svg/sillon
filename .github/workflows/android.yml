@@ -1,0 +1,52 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SILLON_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/sillon.jks"
+            echo "SILLON_KEYSTORE=$RUNNER_TEMP/sillon.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No SILLON_KEYSTORE_B64 secret: built with a temporary key, not published (it could not update an installed Sillon)."
+          fi
+      - name: Build
+        working-directory: android
+        env:
+          SILLON_KEYSTORE_PASSWORD: ${{ secrets.SILLON_KEYSTORE_PASSWORD }}
+        run: |
+          export SILLON_VERSION_CODE=$((GITHUB_RUN_NUMBER + 1))
+          export SILLON_VERSION_NAME="0.1.${GITHUB_RUN_NUMBER}"
+          ./gradlew assembleRelease --console=plain
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/Sillon.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sillon-apk
+          path: ${{ runner.temp }}/Sillon.apk
+      - name: Release
+        if: env.SILLON_KEYSTORE != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="android-0.1.${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" "$RUNNER_TEMP/Sillon.apk" --title "Sillon Android 0.1.${GITHUB_RUN_NUMBER}" \
+            --notes "Appli Android de Sillon. Installe Sillon.apk sur le téléphone." --latest
