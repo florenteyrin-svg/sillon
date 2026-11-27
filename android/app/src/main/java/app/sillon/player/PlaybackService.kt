@@ -79,6 +79,7 @@ class PlaybackService : MediaLibraryService() {
                 if (!isPlaying) saveQueueToServer()
             }
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = saveQueue()
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) = recoverFromError()
             override fun onRepeatModeChanged(repeatMode: Int) = saveQueue()
         })
         handler.post(periodicSave)
@@ -107,6 +108,28 @@ class PlaybackService : MediaLibraryService() {
         player.release()
         scope.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * A song played from Apple Music arrives while it downloads; if the stream breaks (network, file
+     * finished being written...), ask for it again and carry on from the same place, up to 3 times per song.
+     */
+    private var retries = 0
+    private var retriedId: String? = null
+
+    private fun recoverFromError() {
+        val id = player.currentMediaItem?.mediaId ?: return
+        if (id != retriedId) { retriedId = id; retries = 0 }
+        if (retries >= 3) return
+        retries++
+        val index = player.currentMediaItemIndex
+        val position = player.currentPosition
+        handler.postDelayed({
+            if (player.currentMediaItem?.mediaId != id) return@postDelayed
+            player.seekTo(index, position)
+            player.prepare()
+            player.play()
+        }, 1500L * retries)
     }
 
     // ---- queue kept on the phone ----

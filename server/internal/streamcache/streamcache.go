@@ -76,10 +76,16 @@ func (c *Cache) findAudio(id string) (path string, partial bool) {
 		}
 		return nil
 	})
-	if final != "" {
-		return final, c.Status(id) == nil || c.Status(id).Status == "running"
+	running := c.Status(id) != nil && c.Status(id).Status == "running"
+	// Only the ".part" file grows in a clean, append-only way. A finished file seen while the download is
+	// still running is being post-processed (tags, ALAC fix) and may be rewritten: wait for the end.
+	if part != "" {
+		return part, true
 	}
-	return part, part != ""
+	if final != "" && !running {
+		return final, false
+	}
+	return "", false
 }
 
 // Serve sends the song: the finished file (with seeking), or the growing file as it is written.
@@ -88,7 +94,7 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string) {
 	os.Chtimes(c.dir(id), now, now) // most recently played = kept longest
 
 	// Wait for the first bytes (Apple's licence and the first fragments take a few seconds)
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	var path string
 	var partial bool
 	for {

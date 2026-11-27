@@ -54,7 +54,7 @@ object Downloads {
 fun SearchScreen() {
     val ctx = LocalApp.current
     var query by rememberSaveable { mutableStateOf("") }
-    var appleMusic by rememberSaveable { mutableStateOf(true) }
+    var appleMusic by rememberSaveable { mutableStateOf(false) }
     var library by remember { mutableStateOf<SillonApi.LibrarySearch?>(null) }
     var catalog by remember { mutableStateOf<CatalogSearch?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -63,8 +63,8 @@ fun SearchScreen() {
         error = null
         if (query.isBlank()) { library = null; catalog = null; return@LaunchedEffect }
         delay(350) // wait for the end of typing
-        runCatching { ctx.api.search(query) }.onSuccess { library = it }
         if (appleMusic) runCatching { ctx.api.catalogSearch(query) }.onSuccess { catalog = it }.onFailure { error = it.message }
+        else runCatching { ctx.api.search(query) }.onSuccess { library = it }.onFailure { error = it.message }
     }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -82,21 +82,23 @@ fun SearchScreen() {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
             )
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
-                SegmentedButton(appleMusic, { appleMusic = true }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("Partout") }
-                SegmentedButton(!appleMusic, { appleMusic = false }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("Ma bibliothèque") }
+                SegmentedButton(!appleMusic, { appleMusic = false }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("Serveur") }
+                SegmentedButton(appleMusic, { appleMusic = true }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("Apple Music") }
             }
         }
 
         val lib = library
-        if (lib != null && (lib.songs.isNotEmpty() || lib.albums.isNotEmpty() || lib.artists.isNotEmpty())) {
-            item { SectionTitle("Dans ta bibliothèque") }
-            items(lib.artists.take(3), key = { "ar-" + it.id }) { a ->
+        if (!appleMusic && lib != null && query.isNotBlank()) {
+            if (lib.songs.isEmpty() && lib.albums.isEmpty() && lib.artists.isEmpty()) {
+                item { Message("Rien sur ton serveur. Essaie l'onglet Apple Music.") }
+            }
+            items(lib.artists, key = { "ar-" + it.id }) { a ->
                 TrackRow(a.name, "Artiste", ctx.api.coverUrl(a.id, 150)) { ctx.openArtist(a.id) }
             }
-            items(lib.albums.take(6), key = { "al-" + it.id }) { a ->
+            items(lib.albums, key = { "al-" + it.id }) { a ->
                 TrackRow(a.name, "Album · ${a.artist}", ctx.api.coverUrl(a.id, 150), a.quality) { ctx.openAlbum(a.id) }
             }
-            itemsIndexed(lib.songs.take(15), key = { _, s -> "s-" + s.id }) { i, s ->
+            itemsIndexed(lib.songs, key = { _, s -> "s-" + s.id }) { i, s ->
                 TrackRow(s.title, "Titre · ${s.artist}", ctx.api.coverUrl(s.albumId, 150), s.quality) {
                     ctx.play(lib.songs.map { it.toQueueTrack() }, i)
                 }
@@ -106,11 +108,9 @@ fun SearchScreen() {
         val cat = catalog
         if (appleMusic && cat != null) {
             item {
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth().padding(end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) { SectionTitle("Apple Music") }
-                    Text("Appuie pour écouter", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-                }
+                Text("Appuie sur un titre pour l'écouter, la flèche le télécharge sur ton serveur.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
             }
             if (cat.albums.isNotEmpty()) {
                 item {
@@ -137,8 +137,10 @@ fun SearchScreen() {
                 ) { ctx.playCatalog(cat.songs, i) }
             }
         }
-        if (error != null) item { Message("Apple Music : $error") }
-        if (query.isBlank()) item { Message("Cherche dans ta bibliothèque et dans tout Apple Music.") }
+        if (error != null) item { Message(if (appleMusic) "Apple Music : $error" else "Serveur : $error") }
+        if (query.isBlank()) item {
+            Message(if (appleMusic) "Cherche dans tout Apple Music." else "Cherche dans ta musique, sur ton serveur.")
+        }
     }
 }
 
