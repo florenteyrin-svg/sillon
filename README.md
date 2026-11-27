@@ -14,6 +14,7 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
 - **Recherche et téléchargement Apple Music** via à la carte, sans exposer à la carte sur Internet.
   Ta version personnalisée d'à la carte est dans [`alacarte/`](alacarte/MES_MODIFS.md) (rangement Mes FLAC /
   Mes MP3 / Mes Dolby Atmos / Mes Playlists, Mes Découvertes, pochettes animées, clips).
+- **Pochettes animées** comme Apple Music : celles qu'à la carte enregistre sont fournies à l'appli.
 - **Playlists intelligentes** calculées en quelques millisecondes.
 - **Reprise de lecture** sur n'importe quel appareil (file d'attente et position gardées par le serveur).
 - Léger : ~30 Mo de RAM pour 22 000 titres.

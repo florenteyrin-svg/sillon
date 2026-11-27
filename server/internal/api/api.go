@@ -37,6 +37,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", a.auth(a.events))
 	mux.HandleFunc("GET /api/library/status", a.auth(a.status))
 	mux.HandleFunc("GET /api/library/changes", a.auth(a.changes))
+	mux.HandleFunc("GET /api/animated-cover/{id}", a.auth(a.animatedCover))
 	mux.HandleFunc("GET /api/catalog/search", a.auth(a.catalogSearch))
 	mux.HandleFunc("GET /api/catalog/album/{id}", a.auth(a.catalogAlbum))
 	mux.HandleFunc("GET /api/catalog/artist/{id}", a.auth(a.catalogArtist))
@@ -144,6 +145,18 @@ func (a *API) changes(w http.ResponseWriter, r *http.Request, u *db.User) {
 	var total int
 	a.DB.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&total)
 	writeJSON(w, map[string]any{"now": time.Now().Unix(), "added": ids, "total": total})
+}
+
+// animatedCover sends an album's animated cover (looping silent video), for an album or song id.
+func (a *API) animatedCover(w http.ResponseWriter, r *http.Request, u *db.User) {
+	full, ok := a.Subsonic.Covers.AnimatedPath(r.PathValue("id"))
+	if !ok {
+		jsonError(w, http.StatusNotFound, "no animated cover")
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, full)
 }
 
 // ---- Apple Music catalog through à la carte ----

@@ -37,6 +37,8 @@ Stables et préfixés : `tr-` titre (chemin du fichier), `al-` album (artiste de
 
 - `quality` sur les titres et albums : `hires`, `cd`, `atmos` ou `lossy` (le logo à afficher).
   La version Dolby Atmos d'un album reste un album séparé.
+- `animatedCover: true` sur les titres et albums qui ont une pochette animée (`cover/animated.mp4`
+  dans le dossier de l'album, enregistrée par à la carte).
 - `smart` sur les playlists.
 
 ## API Sillon (`/api`)
@@ -51,6 +53,7 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 | GET | `/api/events` | Flux d'événements : `library.added`, `library.removed`, `library.scan`, `download.job` |
 | GET | `/api/library/status` | Nombre de titres, albums, répartition des qualités |
 | GET | `/api/library/changes?since=<unix>` | Titres ajoutés depuis, pour une mise à jour locale rapide |
+| GET | `/api/animated-cover/{id}` | Pochette animée (vidéo MP4 en boucle) d'un album ou d'un titre |
 | GET | `/api/catalog/search?q=` | Recherche Apple Music ; chaque album/titre porte `inLibrary` (+ `libraryId`) |
 | GET | `/api/catalog/album/{id}` | Détail d'un album Apple Music |
 | GET | `/api/catalog/artist/{id}` | Détail d'un artiste Apple Music |

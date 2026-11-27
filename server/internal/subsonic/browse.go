@@ -2,6 +2,7 @@ package subsonic
 
 import (
 	"net/http"
+	"path"
 	"sort"
 	"strings"
 	"unicode"
@@ -36,8 +37,11 @@ func (s *Server) song(t *db.Track, ud userData) M {
 		"bitRate": t.Bitrate, "samplingRate": t.SampleRate, "channelCount": t.Channels, "path": t.Path,
 		"type": "music", "mediaType": "song", "created": iso(t.CreatedAt), "displayArtist": t.Artist,
 		"displayAlbumArtist": t.AlbumArtist, "isVideo": false,
-		// Sillon's own field: the logo to show (hires | cd | lossy)
+		// Sillon's own field: the logo to show (hires | cd | atmos | lossy)
 		"quality": t.Quality,
+	}
+	if s.Covers != nil && s.Covers.Animated(path.Dir(t.Path)) {
+		m["animatedCover"] = true // video at /api/animated-cover/{id}
 	}
 	if t.BitDepth > 0 {
 		m["bitDepth"] = t.BitDepth
@@ -77,6 +81,9 @@ func (s *Server) album(a *db.Album, ud userData) M {
 		"id": a.ID, "name": a.Name, "title": a.Name, "album": a.Name, "artist": a.Artist, "artistId": a.ArtistID,
 		"coverArt": a.ID, "songCount": a.SongCount, "duration": int(a.Duration + 0.5), "created": iso(a.CreatedAt),
 		"isDir": true, "parent": a.ArtistID, "displayArtist": a.Artist, "quality": a.Quality,
+	}
+	if s.Covers != nil && a.Dir != "" && s.Covers.Animated(a.Dir) {
+		m["animatedCover"] = true
 	}
 	if a.Year > 0 {
 		m["year"] = a.Year

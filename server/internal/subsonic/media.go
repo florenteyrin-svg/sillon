@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dhowden/tag"
 	"golang.org/x/image/draw"
@@ -111,6 +113,55 @@ type Covers struct {
 	MusicDir string
 	CacheDir string
 	mu       sync.Mutex
+
+	animMu sync.Mutex
+	anim   map[string]animEntry // album folder -> animated cover found, checked at
+}
+
+type animEntry struct {
+	ok bool
+	at time.Time
+}
+
+// AnimatedFile is where à la carte saves an album's animated cover (silent looping H.264 video).
+const AnimatedFile = "cover/animated.mp4"
+
+// Animated tells whether the album folder (relative to the music folder) has an animated cover.
+// Answers are kept 2 minutes, so long lists do not hit the disk for every song.
+func (c *Covers) Animated(dirRel string) bool {
+	c.animMu.Lock()
+	defer c.animMu.Unlock()
+	if c.anim == nil {
+		c.anim = map[string]animEntry{}
+	}
+	if e, ok := c.anim[dirRel]; ok && time.Since(e.at) < 2*time.Minute {
+		return e.ok
+	}
+	_, err := os.Stat(filepath.Join(c.MusicDir, filepath.FromSlash(dirRel), filepath.FromSlash(AnimatedFile)))
+	c.anim[dirRel] = animEntry{err == nil, time.Now()}
+	return err == nil
+}
+
+// AnimatedPath returns the animated cover file of an album or song id, if there is one.
+func (c *Covers) AnimatedPath(id string) (string, bool) {
+	var dir string
+	switch {
+	case strings.HasPrefix(id, "al-"):
+		c.DB.QueryRow(`SELECT dir FROM albums WHERE id = ?`, id).Scan(&dir)
+	case strings.HasPrefix(id, "tr-"):
+		var p string
+		if c.DB.QueryRow(`SELECT path FROM tracks WHERE id = ?`, id).Scan(&p) == nil {
+			dir = path.Dir(p)
+		}
+	}
+	if dir == "" {
+		return "", false
+	}
+	full := filepath.Join(c.MusicDir, filepath.FromSlash(dir), filepath.FromSlash(AnimatedFile))
+	if _, err := os.Stat(full); err != nil {
+		return "", false
+	}
+	return full, true
 }
 
 var folderImages = []string{"cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.jpeg", "folder.png",
