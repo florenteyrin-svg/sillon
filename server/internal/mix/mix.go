@@ -3,19 +3,22 @@ package mix
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Version is part of every transition's name: changing how transitions are made renders them again.
-const Version = "2"
+const Version = "3"
 
 type Client struct {
 	URL      string // e.g. http://sillon-dj:8085 (empty: DJ mix off)
@@ -24,6 +27,7 @@ type Client struct {
 	http     *http.Client
 	mu       sync.Mutex
 	asked    map[string]time.Time
+	segMu    sync.Map // segment key -> *sync.Mutex (one render per segment)
 }
 
 func New(url, musicDir, dir string) *Client {
@@ -102,12 +106,98 @@ func (c *Client) File(key string) (string, bool) {
 	return p, err == nil
 }
 
-// Trim removes transitions not played for 14 days.
+// Trim removes transitions not played for 14 days, and DJ segments (whole songs) after a day.
 func (c *Client) Trim() {
 	entries, _ := os.ReadDir(c.Dir)
 	for _, e := range entries {
-		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 14*24*time.Hour {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		maxAge := 14 * 24 * time.Hour
+		if strings.HasPrefix(e.Name(), "seg-") {
+			maxAge = 24 * time.Hour
+		}
+		if time.Since(info.ModTime()) > maxAge {
 			os.Remove(filepath.Join(c.Dir, e.Name()))
 		}
 	}
+}
+
+// SegmentFormat is shared by every DJ segment, so the player goes from one to the next without a gap.
+const segmentRate = "44100"
+
+// Segment renders one song of a DJ mix as a single file: the transition that brings it in (from prev,
+// when given), then the song itself up to where the transition to next starts (when given).
+// Songs touch end to start with no jump inside a file: no cut between them.
+// songDur is the song's length in seconds; prev/next transitions must be "done".
+func (c *Client) Segment(songRel string, songDur float64, prevKey string, prevT *Transition, nextT *Transition) (string, error) {
+	start, end := 0.0, songDur
+	if prevT != nil {
+		start = prevT.BIn
+	}
+	if nextT != nil {
+		end = nextT.AOut
+	}
+	if end-start < 1 {
+		return "", fmt.Errorf("segment too short")
+	}
+	h := sha1.Sum([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%.4f\x00%.4f", Version, songRel, prevKey, start, end)))
+	key := "seg-" + hex.EncodeToString(h[:10])
+	out := filepath.Join(c.Dir, key+".flac")
+	if _, err := os.Stat(out); err == nil {
+		now := time.Now()
+		os.Chtimes(out, now, now)
+		return out, nil
+	}
+	m, _ := c.segMu.LoadOrStore(key, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := os.Stat(out); err == nil {
+		return out, nil
+	}
+	song := filepath.Join(c.MusicDir, filepath.FromSlash(songRel))
+	var args []string
+	args = append(args, "-v", "error", "-y")
+	filter := ""
+	if prevT != nil {
+		args = append(args, "-i", filepath.Join(c.Dir, prevKey+".flac"))
+	}
+	args = append(args, "-ss", fmt.Sprintf("%.6f", start), "-t", fmt.Sprintf("%.6f", end-start), "-i", song)
+	norm := "aresample=" + segmentRate + ",aformat=sample_fmts=s32:channel_layouts=stereo"
+	if prevT != nil {
+		filter = "[0:a]" + norm + "[t];[1:a]" + norm + "[s];[t][s]concat=n=2:v=0:a=1[out]"
+	} else {
+		filter = "[0:a]" + norm + "[out]"
+	}
+	tmp := out + ".tmp.flac"
+	args = append(args, "-filter_complex", filter, "-map", "[out]", "-c:a", "flac", "-ar", segmentRate, tmp)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("ffmpeg: %v %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := os.Rename(tmp, out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// Done returns the finished transition from A to B, or nil (without asking for it).
+func (c *Client) Done(aRel, bRel string) (*Transition, string) {
+	key := Key(aRel, bRel)
+	b, err := os.ReadFile(filepath.Join(c.Dir, key+".json"))
+	if err != nil {
+		return nil, key
+	}
+	var t Transition
+	if json.Unmarshal(b, &t) != nil || t.Status != "done" {
+		return nil, key
+	}
+	return &t, key
 }

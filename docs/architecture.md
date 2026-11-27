@@ -106,28 +106,28 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 
 ## Mix DJ
 
-Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband via ffmpeg).
+Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband).
 
-1. L'appli demande `GET /api/mix/transition?from=<titre en cours>&to=<suivant>` (et la suivante d'avance).
-   Sillon transmet au conteneur DJ, qui calcule en tâche de fond ; l'appli redemande jusqu'à `done`.
-2. Seules la fin de A (~50 s, silence final coupé) et le début de B (~50 s) sont traités :
-   - tempo et grille de battements au centième de BPM (cohérence de phase de toutes les attaques de
-     l'extrait), premier temps de mesure (changement d'harmonie + grosse caisse), tonalité (profils de
-     Krumhansl, roue de Camelot) ; si les tempos sont proches (8 %, double/demi-temps compris), B est
-     étiré au tempo de A sans changer sa hauteur (rubberband), et son premier temps est recherché dans
-     l'audio étiré (le retard de l'étireur est mesuré, pas supposé) ;
-   - séparation voix / batterie / basse / reste (Demucs `htdemucs`, carte NVIDIA si utilisable, sinon
-     processeur ; si la carte est occupée, par Jellyfin par exemple, le processeur prend le relais) ;
-   - mix sur 16 mesures, calé sur les premiers temps, jamais deux mélodies à la fois : batterie de B
-     (mesures 2-4), bascule batterie + basse à la mesure 8 (basse de B à la mesure 12 si les tonalités ne
-     vont pas ensemble), la voix de A chante sur le rythme de B (mesures 8-12), puis la mélodie et la voix
-     de B ;
-   - le passage commence exactement sur le son d'origine de A et finit sur B à sa vitesse normale.
-   - Tempos trop différents : fondu enchaîné de 10 s.
-3. Réponse : `aOut` (où quitter A), `bIn` (où reprendre B), `url` du passage (FLAC, `/api/mix/file/…`).
-4. L'appli joue A coupé à `aOut` → le passage → B à partir de `bIn`.
-5. Les passages sont gardés dans `<cache>/mix`, effacés après 14 jours sans écoute. Les FLAC ne sont jamais touchés.
+1. L'appli demande `GET /api/mix/transition?from=&to=` pour les titres à venir ; Sillon transmet au
+   conteneur DJ, qui calcule en tâche de fond ; l'appli redemande jusqu'à `done`.
+2. Seules la fin de A (~50 s) et le début de B (~50 s) sont traités :
+   - grille de battements au centième de BPM, premier temps de mesure, tonalité (roue de Camelot) ;
+   - **rampe de tempo comme le bouton SYNC d'un logiciel DJ** : pendant 16 mesures le tempo glisse de
+     celui de A à celui de B (rap 90 → techno 130 compris, jusqu'à ×1,6 après regroupement double/demi
+     temps) ; les deux titres sont étirés battement par battement sur cette même courbe (carte de temps
+     rubberband, hauteur conservée), donc restent calés tout du long ;
+   - séparation voix / batterie / basse / reste (Demucs `htdemucs`, carte NVIDIA si utilisable) ;
+   - jamais deux mélodies à la fois : batterie de B (mesures 2-4), bascule batterie + basse à la mesure 8
+     (basse de B à la mesure 12 si les tonalités ne vont pas ensemble), la voix de A chante sur le rythme de
+     B (mesures 8-12), puis la mélodie et la voix de B ;
+   - début = son exact de A, fin = son exact de B à son propre tempo (fondus de 50 ms dans l'original).
+   - Pas de rythme régulier ou tempos trop éloignés : fondu enchaîné de 10 s.
+3. **Segments** : `GET /api/mix/segment?song=&prev=&next=` rend un titre du mix en UN fichier continu :
+   [passage depuis prev] + le titre jusqu'au point exact où commence le passage vers next (44,1 kHz /
+   24 bits pour tous). Le téléphone enchaîne ces fichiers bout à bout : pas de saut dans un titre, pas de
+   coupure entre deux titres. Le titre en cours au moment d'activer le mix garde sa fin normale.
+4. Passages gardés 14 jours, segments 1 jour, dans `<cache>/mix`. Les FLAC ne sont jamais touchés.
 
-Mesures (morceaux de test à 121,37 et 124,62 BPM, attaques mesurées dans l'audio produit) : écart moyen
-entre les temps des deux titres < 1 ms, au pire ~6 ms ; ~30–40 s de calcul par passage sur un processeur
-4 cœurs sans carte graphique.
+Mesures (morceaux de test, attaques mesurées dans l'audio produit) : de 92,3 à 128,4 BPM, écart moyen
+entre les temps des deux titres ~1 ms (au pire ~10 ms) pendant toute la rampe ; raccords entre segments
+sans saut de signal ; ~50 s de calcul par passage sur un processeur 4 cœurs sans carte graphique.

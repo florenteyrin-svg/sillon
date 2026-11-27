@@ -2,9 +2,9 @@
 # PyTorch built for CUDA 11.8 still runs on older NVIDIA cards (e.g. Quadro M2000); without a usable GPU
 # it works on the CPU.
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg rubberband-cli \
   && rm -rf /var/lib/apt/lists/* \
-  && ffmpeg -hide_banner -filters | grep -q rubberband
+  && rubberband --version
 RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu118
 RUN pip install --no-cache-dir demucs==4.1.0 librosa==1.0.1 soundfile
 ENV HF_HOME=/models

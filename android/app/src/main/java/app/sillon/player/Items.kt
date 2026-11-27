@@ -45,6 +45,8 @@ object Extras {
     const val CATALOG = "sillon.catalog"
     const val MIXABLE = "sillon.mixable"
     const val TRANSITION = "sillon.transition"
+    const val DJ_PREV = "sillon.djPrev" // DJ segment: song whose transition opens this one
+    const val DJ_NEXT = "sillon.djNext" // DJ segment: song this one ends into
 }
 
 fun QueueTrack.toMediaItem(api: SillonApi): MediaItem {

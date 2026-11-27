@@ -24,6 +24,7 @@ import math
 import os
 import queue
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,7 +34,8 @@ import numpy as np
 SR = 44100
 WINDOW = 50.0  # seconds decoded at each side
 BARS = 16
-MAX_TEMPO_GAP = 0.08
+MAX_TEMPO_RATIO = 1.6  # beyond this (after double/half time), a crossfade instead of a beat-matched mix
+JOIN = 0.05  # seconds: both ends of a transition melt into the original songs (sample-exact joins)
 
 log = logging.getLogger("sillon-dj")
 
@@ -188,14 +190,39 @@ def key_name(k):
     return _NAMES[k[0]] + ("m" if k[1] else "")
 
 
-def tempo_ratio(pa, pb):
-    """Speed factor for B (rubberband tempo) so its beat period matches A's, allowing double/half time."""
-    best = None
-    for mult in (0.5, 1.0, 2.0):
-        r = (pb * mult) / pa
-        if best is None or abs(r - 1) < abs(best - 1):
-            best = r
-    return best, abs(best - 1)
+def beat_multiple(pa, pb):
+    """B's beats grouped (x2) or split (x0.5) so its pulse is closest to A's: 70 BPM rap against 140 BPM
+    techno is matched beat for 2 beats, like a DJ would."""
+    return min((0.5, 1.0, 2.0), key=lambda m: abs(math.log(pb * m / pa)))
+
+
+def write_wav(x, path):
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", "pipe:0",
+                    "-c:a", "pcm_f32le", path], input=np.ascontiguousarray(x.T).astype(np.float32).tobytes(), check=True)
+
+
+def read_wav(path):
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "f32le", "-ac", "2", "-ar", str(SR), "pipe:1"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.float32).reshape(-1, 2).T.copy()
+
+
+def stretch_to_beats(x, src_beats, dst_beats, n_out, workdir, name):
+    """Time-stretches x (pitch kept) so the beat at src_beats[k] (seconds in x) lands at dst_beats[k] in the
+    output: a varying tempo, beat by beat (rubberband key-frame map)."""
+    src = os.path.join(workdir, name + "-in.wav")
+    dst = os.path.join(workdir, name + "-out.wav")
+    tmap = os.path.join(workdir, name + ".map")
+    write_wav(x, src)
+    with open(tmap, "w") as f:
+        for s_, d_ in zip(src_beats, dst_beats):
+            f.write(f"{int(round(s_ * SR))} {int(round(d_ * SR))}\n")
+    subprocess.run(["rubberband", "-q", "-3", "--timemap", tmap, "-D", f"{n_out / SR:.6f}", src, dst],
+                   check=True, capture_output=True)
+    y = read_wav(dst)
+    if y.shape[1] < n_out:
+        y = np.pad(y, ((0, 0), (0, n_out - y.shape[1])))
+    return y[:, :n_out]
 
 
 def ramp(n, points):
@@ -286,10 +313,13 @@ class Separator:
 # ---------------------------------------------------------------- transition
 
 
-def plan_and_render(sep, a_path, b_path):
+def plan_and_render(sep, a_path, b_path, workdir="/tmp"):
+    """Beat-matched transition with a tempo ramp, like the SYNC button of a DJ software: over the transition
+    the tempo glides from A's to B's, and both songs follow that same curve beat by beat. It starts on A
+    exactly (same tempo, same sound) and ends on B exactly (B's own tempo, same sound)."""
     t0 = time.time()
     a_dur, _ = probe(a_path)
-    b_dur, b_rate = probe(b_path)
+    b_dur, _ = probe(b_path)
 
     # A: last WINDOW seconds, up to its real end
     a_start = max(0.0, a_dur - WINDOW)
@@ -308,49 +338,52 @@ def plan_and_render(sep, a_path, b_path):
     if ga is None or gb is None or ga.strength < 0.25 or gb.strength < 0.25:
         meta["reason"] = "no steady beat"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
-    ratio, gap = tempo_ratio(ga.period, gb.period)
+    pa = ga.period
+    mult = beat_multiple(pa, gb.period)
+    pb = gb.period * mult  # B's pulse, in the unit matched with A's beats
     meta.update({"tempoA": round(ga.bpm, 2), "tempoB": round(gb.bpm, 2)})
-    if gap > MAX_TEMPO_GAP:
+    if max(pa, pb) / min(pa, pb) > MAX_TEMPO_RATIO:
         meta["reason"] = "tempos too far apart"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
 
-    pa = ga.period
-    bars = BARS
+    # Transition length in beats: 16 bars, fewer if A's ending or B's opening is too short
     a_len = a.shape[1] / SR
-    # Transition = the last `bars` bars of A, starting on a downbeat, ending before A's real end
-    while True:
-        length = bars * 4 * pa
-        last_down = ga.downbeat_at_or_after(a_len - length - 4 * pa)
-        if last_down + length > a_len:
+    b_avail = min(WINDOW, b_dur) - b_start
+    bars = BARS
+    while bars > 4:
+        nb = bars * 4
+        last_down = ga.downbeat_at_or_after(a_len - nb * pa - 4 * pa)
+        if last_down + nb * pa > a_len:
             last_down -= 4 * pa
-        if last_down >= 0 or bars <= 4:
+        b_down = gb.downbeat_at_or_after(0.0)
+        if last_down >= 0 and b_down + nb * pb + 1 < b_avail:
             break
         bars //= 2
-    seg_start = max(0.0, last_down)
-    n = int(round(length * SR))
-    i0 = int(round(seg_start * SR))
-    a_seg = a[:, i0: i0 + n]
-
-    # B starts on its first downbeat, stretched to A's tempo. Decode from 2 beats earlier, then find the
-    # downbeat precisely in the stretched audio (the stretcher's own delay is measured, not assumed).
-    b_down = b_start + gb.downbeat_at_or_after(0.0)
-    lead = 2 * gb.period
-    from_t = max(0.0, b_down - lead)
-    b = decode(b_path, from_t, (length + 8 * pa) * ratio + lead + 2, tempo=ratio)
-    expected = (b_down - from_t) / ratio
-    gs = beat_grid(b)
-    offset = expected
-    if gs is not None:
-        # nearest beat of the stretched grid to where the downbeat should be
-        k = round((expected - gs.phase) / gs.period)
-        cand = gs.phase + k * gs.period
-        if abs(cand - expected) < pa / 2:
-            offset = cand
-    j0 = int(round(offset * SR))
-    b_seg = b[:, j0: j0 + n]
-    if b_seg.shape[1] < n or a_seg.shape[1] < n:
+    nb = bars * 4
+    last_down = ga.downbeat_at_or_after(a_len - nb * pa - 4 * pa)
+    if last_down + nb * pa > a_len:
+        last_down -= 4 * pa
+    b_down = gb.downbeat_at_or_after(0.0)
+    if last_down < 0 or b_down + nb * pb + 1 >= b_avail:
         meta["reason"] = "excerpt too short"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
+
+    # Output beat grid: the beat period glides from A's to B's (linear in tempo)
+    bpm_curve = np.linspace(60 / pa, 60 / pb, nb + 1)
+    periods = 60 / bpm_curve[:-1]
+    out_beats = np.concatenate([[0.0], np.cumsum(periods)])
+    length = float(out_beats[-1])
+    n = int(round(length * SR))
+
+    # Inputs: A from its downbeat, B from its first downbeat, exactly nb beats each
+    i0 = int(round(last_down * SR))
+    a_in = a[:, i0: i0 + int(round(nb * pa * SR)) + int(0.2 * SR)]
+    b_abs = b_start + b_down  # seconds in B
+    b_in_audio = decode(b_path, b_abs, nb * pb + 0.2)
+    src_a = np.arange(nb + 1) * pa
+    src_b = np.arange(nb + 1) * pb
+    a_seg = stretch_to_beats(a_in, src_a, out_beats, n, workdir, "a")
+    b_seg = stretch_to_beats(b_in_audio, src_b, out_beats, n, workdir, "b")
 
     sa = sep.split(a_seg)
     sb = sep.split(b_seg)
@@ -365,25 +398,26 @@ def plan_and_render(sep, a_path, b_path):
     #  bar 8     swap: B's drums and bass take over, A's melody and rhythm leave
     #  bars 8-12 A's voice sings on B's beat (B's bass waits until bar 12 if the keys clash)
     #  bar 12    A's voice leaves, B's melody comes in, then B's voice
-    q = 1.0 / 16
-    e = 0.004  # ~0.1 s ramps: cuts land on the downbeat without clicks
+    # Bars are placed on the real (varying) beat grid of the transition.
+    def at(bar):
+        return float(out_beats[min(nb, int(round(bar * nb / 16)))] / length)
+
+    e = 0.004
     bass_in = 8 if compatible else 12
     gains_a = {
-        "drums": ramp(n, [(0, 1), (8 * q, 1), (8 * q + e, 0), (1, 0)]),
-        "bass": ramp(n, [(0, 1), (8 * q, 1), (8 * q + e, 0), (1, 0)]),
-        "other": ramp(n, [(0, 1), (7 * q, 1), (8 * q, 0), (1, 0)]),
-        "vocals": ramp(n, [(0, 1), (12 * q, 1), (13 * q, 0), (1, 0)]),
+        "drums": ramp(n, [(0, 1), (at(8), 1), (at(8) + e, 0), (1, 0)]),
+        "bass": ramp(n, [(0, 1), (at(8), 1), (at(8) + e, 0), (1, 0)]),
+        "other": ramp(n, [(0, 1), (at(7), 1), (at(8), 0), (1, 0)]),
+        "vocals": ramp(n, [(0, 1), (at(12), 1), (at(13), 0), (1, 0)]),
     }
     gains_b = {
-        "drums": ramp(n, [(0, 0), (2 * q, 0), (4 * q, 1), (1, 1)]),
-        "bass": ramp(n, [(0, 0), (bass_in * q, 0), (bass_in * q + e, 1), (1, 1)]),
-        "other": ramp(n, [(0, 0), (12 * q, 0), (13 * q, 1), (1, 1)]),
-        "vocals": ramp(n, [(0, 0), (13 * q, 0), (14 * q, 1), (1, 1)]),
+        "drums": ramp(n, [(0, 0), (at(2), 0), (at(4), 1), (1, 1)]),
+        "bass": ramp(n, [(0, 0), (at(bass_in), 0), (at(bass_in) + e, 1), (1, 1)]),
+        "other": ramp(n, [(0, 0), (at(12), 0), (at(13), 1), (1, 1)]),
+        "vocals": ramp(n, [(0, 0), (at(13), 0), (at(14), 1), (1, 1)]),
     }
-    # Start from the original audio and only add what changes (gain - 1) per stem: where every gain is 1,
-    # the transition is exactly the original song, so the joins with A and B are seamless.
-    a_part = a_seg[:, :n].copy()
-    b_part = b_seg[:, :n].copy()
+    a_part = a_seg.copy()
+    b_part = b_seg.copy()
     full = ramp(n, [(0, 1), (1, 1)])
     for name in sa:
         a_part += sa[name][:, :n] * (gains_a.get(name, full) - 1.0)
@@ -391,19 +425,22 @@ def plan_and_render(sep, a_path, b_path):
     b_presence = np.maximum.reduce([gains_b[k] for k in gains_b])
     a_presence = np.maximum.reduce([gains_a[k] for k in gains_a])
     mix = a_part * np.minimum(1.0, a_presence * 4) + b_part * np.minimum(1.0, b_presence * 4)
+    mix = soft_limit(mix)
 
     a_out = a_start + i0 / SR
-    # Where B continues after the transition, in B's own (unstretched) timeline
-    b_in = from_t + (j0 / SR + length) * ratio
-    if abs(ratio - 1) > 1e-3:
-        # The transition ends on B at its own speed (short crossfade), so B's file carries on from b_in
-        xf = int(0.35 * SR)
-        native = decode(b_path, b_in - xf / SR, xf / SR + 0.05)[:, :xf]
-        if native.shape[1] == xf:
-            w = np.sin(np.linspace(0, math.pi / 2, xf, dtype=np.float32)) ** 2
-            mix[:, -xf:] = mix[:, -xf:] * (1 - w) + native * w
-    meta.update({"style": "vocal-swap", "bars": bars, "ratio": round(ratio, 5)})
-    return soft_limit(mix), a_out, b_in, b_rate, meta, t0
+    b_in = b_abs + nb * pb  # B carries on from here at its own tempo, exactly where the ramp ended
+    # Sample-exact joins: the first and last 50 ms melt into the untouched songs
+    xf = int(JOIN * SR)
+    orig_a = a[:, i0: i0 + xf]
+    orig_b = decode(b_path, b_in - xf / SR, xf / SR + 0.02)[:, :xf]
+    w = np.sin(np.linspace(0, math.pi / 2, xf, dtype=np.float32)) ** 2
+    if orig_a.shape[1] == xf:
+        mix[:, :xf] = orig_a * (1 - w) + mix[:, :xf] * w
+    if orig_b.shape[1] == xf:
+        mix[:, -xf:] = mix[:, -xf:] * (1 - w) + orig_b * w
+    meta.update({"style": "beatmatch", "bars": bars, "bpmFrom": round(60 / pa, 2), "bpmTo": round(60 / pb, 2),
+                 "beatMultiple": mult})
+    return mix, a_out, b_in, SR, meta, t0
 
 
 def crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0):
@@ -419,7 +456,7 @@ def crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0):
     mix = soft_limit(a_seg * np.cos(t) + b * np.sin(t))
     a_out = a_start + (a.shape[1] - n) / SR
     meta.update({"style": "crossfade"})
-    return mix, a_out, b_start + fade, b_rate, meta, t0
+    return mix, a_out, b_start + fade, SR, meta, t0
 
 
 def write_flac(mix, path, rate):
@@ -457,8 +494,9 @@ class Worker:
             meta_path = os.path.join(job["out"], job["key"] + ".json")
             try:
                 os.makedirs(job["out"], exist_ok=True)
-                mix, a_out, b_in, rate, meta, t0 = plan_and_render(self.sep, job["a"], job["b"])
-                write_flac(mix, os.path.join(job["out"], job["key"] + ".flac"), rate)
+                with tempfile.TemporaryDirectory() as wd:
+                    mix, a_out, b_in, rate, meta, t0 = plan_and_render(self.sep, job["a"], job["b"], wd)
+                write_flac(mix, os.path.join(job["out"], job["key"] + ".flac"), SR)
                 meta.update({"status": "done", "aOut": round(a_out, 4), "bIn": round(b_in, 4),
                              "length": round(mix.shape[1] / SR, 3), "seconds": round(time.time() - t0, 1)})
                 log.info("%s: %s in %.1fs", job["key"], meta["style"], meta["seconds"])

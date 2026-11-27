@@ -53,6 +53,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/recent", a.auth(a.recent))
 	mux.HandleFunc("GET /api/mix/transition", a.auth(a.mixTransition))
 	mux.HandleFunc("GET /api/mix/file/{key}", a.auth(a.mixFile))
+	mux.HandleFunc("GET /api/mix/segment", a.auth(a.mixSegment))
 	mux.HandleFunc("GET /api/smart-playlists", a.auth(a.smartList))
 	mux.HandleFunc("POST /api/smart-playlists", a.auth(a.smartCreate))
 	mux.HandleFunc("PUT /api/smart-playlists/{id}", a.auth(a.smartUpdate))
@@ -475,6 +476,51 @@ func (a *API) mixTransition(w http.ResponseWriter, r *http.Request, u *db.User) 
 		return
 	}
 	writeJSON(w, t)
+}
+
+// mixSegment sends one song of a DJ mix as a single file: [transition from prev] + song up to the
+// transition to next. prev / next are optional (song ids); their transitions must be ready.
+func (a *API) mixSegment(w http.ResponseWriter, r *http.Request, u *db.User) {
+	if a.Mix == nil {
+		jsonError(w, http.StatusServiceUnavailable, "DJ mix is not set up")
+		return
+	}
+	song, err := a.DB.TrackByID(r.Form.Get("song"))
+	if err != nil || song == nil {
+		jsonError(w, 404, "unknown song")
+		return
+	}
+	var prevT, nextT *mix.Transition
+	prevKey := ""
+	if id := r.Form.Get("prev"); id != "" {
+		prev, _ := a.DB.TrackByID(id)
+		if prev == nil {
+			jsonError(w, 404, "unknown previous song")
+			return
+		}
+		if prevT, prevKey = a.Mix.Done(prev.Path, song.Path); prevT == nil {
+			jsonError(w, http.StatusConflict, "transition from the previous song not ready")
+			return
+		}
+	}
+	if id := r.Form.Get("next"); id != "" {
+		next, _ := a.DB.TrackByID(id)
+		if next == nil {
+			jsonError(w, 404, "unknown next song")
+			return
+		}
+		if nextT, _ = a.Mix.Done(song.Path, next.Path); nextT == nil {
+			jsonError(w, http.StatusConflict, "transition to the next song not ready")
+			return
+		}
+	}
+	p, err := a.Mix.Segment(song.Path, song.Duration, prevKey, prevT, nextT)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "audio/flac")
+	http.ServeFile(w, r, p)
 }
 
 func (a *API) mixFile(w http.ResponseWriter, r *http.Request, u *db.User) {

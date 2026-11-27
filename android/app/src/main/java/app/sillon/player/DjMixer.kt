@@ -3,21 +3,25 @@ package app.sillon.player
 import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import app.sillon.data.MixTransition
 import app.sillon.data.Settings
 import app.sillon.data.SillonApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Request
 
 /**
- * DJ mix on the phone side. The server prepares each transition (end of A + start of B, mixed); here the
- * queue becomes  A (cut at aOut) -> transition -> B (from bIn), so the three files play back to back.
+ * DJ mix on the phone side.
  *
- * Transitions are asked for the playing song and the next one in advance. When the next song's transition
- * is ready before that song starts, its end is clipped in the queue (seamless); for the song already playing
- * the player jumps to the transition at aOut.
+ * The server prepares each transition (tempo glide, beats matched, voices swapped) and then serves every
+ * song of the mix as ONE continuous file: [transition that brings it in] + the song, up to the exact point
+ * where the transition to the next song starts. The player only goes from one file to the next, all in the
+ * same format: no jump inside a song, no cut between songs.
+ *
+ * A queued song is rebuilt as such a "segment" once the transitions around it are ready, always ahead of
+ * time (never the song playing, never the next one when it is about to start). The song playing when the
+ * mix is switched on keeps its normal end: the mix starts from the next one.
  */
 class DjMixer(
     private val player: Player,
@@ -25,122 +29,90 @@ class DjMixer(
     private val settings: Settings,
     private val scope: CoroutineScope,
 ) {
-    private val ready = HashMap<String, MixTransition>()
-    private val askedAt = HashMap<String, Long>()
+    private val done = HashSet<String>() // "A>B" transitions ready on the server
     private val failed = HashSet<String>()
-    private var cut: Pair<String, Long>? = null // song playing, position (ms) where to jump to its transition
+    private val askedAt = HashMap<String, Long>()
 
-    private fun pairKey(a: MediaItem, b: MediaItem) = "${a.mediaId}>${b.mediaId}"
+    private fun song(item: MediaItem) = item.mediaId
+    private fun builtPrev(item: MediaItem) = item.mediaMetadata.extras?.getString(Extras.DJ_PREV) ?: ""
+    private fun builtNext(item: MediaItem) = item.mediaMetadata.extras?.getString(Extras.DJ_NEXT) ?: ""
 
     private fun mixable(item: MediaItem): Boolean =
-        !item.isTransition && !item.mediaId.startsWith(CATALOG_PREFIX) &&
-            (item.mediaMetadata.extras?.getBoolean(Extras.MIXABLE) ?: false)
+        !item.mediaId.startsWith(CATALOG_PREFIX) && (item.mediaMetadata.extras?.getBoolean(Extras.MIXABLE) ?: false)
 
     /** Called twice a second by the playback service. */
     fun tick() {
         if (!settings.djEnabled || player.shuffleModeEnabled) {
-            if (hasDjItems()) undo()
+            undo()
             return
         }
         val cur = player.currentMediaItemIndex
-        if (cur < 0 || player.mediaItemCount == 0) return
+        val count = player.mediaItemCount
+        if (cur < 0 || count == 0) return
 
-        cut?.let { (id, ms) ->
-            if (player.currentMediaItem?.mediaId != id) cut = null
-            else if (player.currentPosition >= ms && cur + 1 < player.mediaItemCount && player.getMediaItemAt(cur + 1).isTransition) {
-                cut = null
-                player.seekTo(cur + 1, 0)
-                return
-            }
+        // Ask for the transitions of the next songs (the song playing keeps its end unless it was built mixed)
+        val first = if (builtNext(player.getMediaItemAt(cur)).isNotEmpty()) cur else cur + 1
+        for (k in first until minOf(count - 1, cur + 4)) {
+            val a = player.getMediaItemAt(k)
+            val b = player.getMediaItemAt(k + 1)
+            if (mixable(a) && mixable(b)) ask(song(a), song(b))
         }
 
-        // The playing song and the next two songs (transition items skipped)
-        val songs = (cur until player.mediaItemCount).filter { !player.getMediaItemAt(it).isTransition }.take(3)
-        for (k in 0 until songs.size - 1) consider(songs[k], songs[k + 1], cur)
-    }
-
-    private fun consider(x: Int, y: Int, cur: Int) {
-        if (y != x + 1) return // a transition already sits between them
-        val a = player.getMediaItemAt(x)
-        val b = player.getMediaItemAt(y)
-        if (!mixable(a) || !mixable(b)) return
-        val key = pairKey(a, b)
-        if (key in failed) return
-        val t = ready[key]
-        if (t == null || t.status != "done") {
-            ask(key, a.mediaId, b.mediaId)
-            return
+        // Rebuild the queued songs whose surroundings changed
+        val remaining = player.duration.takeIf { it > 0 }?.minus(player.currentPosition) ?: Long.MAX_VALUE
+        for (k in cur + 1 until minOf(count, cur + 4)) {
+            if (k == cur + 1 && remaining < 25_000) continue // about to start: leave it as it is
+            val item = player.getMediaItemAt(k)
+            if (!mixable(item)) continue
+            val before = player.getMediaItemAt(k - 1)
+            val prev = if (builtNext(before) == song(item)) song(before) else ""
+            val after = if (k + 1 < count) player.getMediaItemAt(k + 1) else null
+            val next = if (after != null && mixable(after) && "${song(item)}>${song(after)}" in done) song(after) else ""
+            if (prev != builtPrev(item) || next != builtNext(item)) rebuild(k, item, prev, next)
         }
-        apply(x, y, a, b, t, x == cur)
     }
 
-    private fun ask(key: String, from: String, to: String) {
+    private fun ask(from: String, to: String) {
+        val key = "$from>$to"
+        if (key in done || key in failed) return
         val now = System.currentTimeMillis()
-        if (now - (askedAt[key] ?: 0) < 4000) return
+        if (now - (askedAt[key] ?: 0) < 5000) return
         askedAt[key] = now
         scope.launch {
             val t = runCatching { withContext(Dispatchers.IO) { api.mixTransition(from, to) } }.getOrNull() ?: return@launch
             when (t.status) {
-                "done" -> ready[key] = t
+                "done" -> done += key
                 "failed" -> failed += key
             }
         }
     }
 
-    private fun apply(x: Int, y: Int, a: MediaItem, b: MediaItem, t: MixTransition, aIsPlaying: Boolean) {
-        val aOutMs = (t.aOut * 1000).toLong()
-        val bInMs = (t.bIn * 1000).toLong()
-        val url = t.url ?: return
-        // Too late for the song playing: it is already past the point where the transition starts
-        if (aIsPlaying && player.currentPosition > aOutMs - 1500) return
-
-        val extras = Bundle(b.mediaMetadata.extras ?: Bundle()).apply { putBoolean(Extras.TRANSITION, true) }
-        // The transition shows the next song (it is already playing in the mix)
-        val transition = MediaItem.Builder()
-            .setMediaId(MIX_PREFIX + pairKey(a, b))
-            .setUri(api.serverUrl(url))
-            .setMediaMetadata(b.mediaMetadata.buildUpon().setExtras(extras).build())
-            .build()
-        player.addMediaItem(y, transition)
-
-        val bClip = b.clippingConfiguration.buildUpon().setStartPositionMs(bInMs).build()
-        swap(y + 1, b.buildUpon().setClippingConfiguration(bClip).build())
-
-        if (aIsPlaying) {
-            cut = a.mediaId to aOutMs
-        } else {
-            val aClip = a.clippingConfiguration.buildUpon().setEndPositionMs(aOutMs).build()
-            swap(x, a.buildUpon().setClippingConfiguration(aClip).build())
+    private fun rebuild(index: Int, item: MediaItem, prev: String, next: String) {
+        val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
+            putString(Extras.DJ_PREV, prev)
+            putString(Extras.DJ_NEXT, next)
+        }
+        val meta = item.mediaMetadata.buildUpon().setExtras(extras).build()
+        val uri = if (prev.isEmpty() && next.isEmpty()) api.streamUrl(song(item)) else api.segmentUrl(song(item), prev, next)
+        val rebuilt = MediaItem.Builder().setMediaId(item.mediaId).setUri(uri).setMediaMetadata(meta).build()
+        // remove + add: replaceMediaItem() keeps the old source when it thinks nothing important changed
+        player.removeMediaItem(index)
+        player.addMediaItem(index, rebuilt)
+        // Let the server render it now, so it is ready long before it plays
+        if (prev.isNotEmpty() || next.isNotEmpty()) scope.launch(Dispatchers.IO) {
+            runCatching {
+                api.http.newCall(Request.Builder().url(uri).header("Range", "bytes=0-0").build()).execute().close()
+            }
         }
     }
 
-    /**
-     * Puts a new version of a queued song in place. replaceMediaItem() would keep the old source when the
-     * file is the same and ignore the new start/end points (the song then restarted from 0): remove + add
-     * makes the player build a clipped source.
-     */
-    private fun swap(index: Int, item: MediaItem) {
-        player.removeMediaItem(index)
-        player.addMediaItem(index, item)
-    }
-
-    private fun hasDjItems(): Boolean = (0 until player.mediaItemCount).any {
-        val item = player.getMediaItemAt(it)
-        item.isTransition || item.clippingConfiguration != MediaItem.ClippingConfiguration.UNSET
-    }
-
-    /** DJ mix switched off: back to whole songs (the one playing is left as it is). */
+    /** DJ mix off: queued songs go back to the original files (the song playing is left as it is). */
     fun undo() {
-        cut = null
         val cur = player.currentMediaItemIndex
-        for (i in player.mediaItemCount - 1 downTo 0) {
-            if (i == cur) continue
-            val item = player.getMediaItemAt(i)
-            if (item.isTransition) {
-                player.removeMediaItem(i)
-            } else if (item.clippingConfiguration != MediaItem.ClippingConfiguration.UNSET) {
-                swap(i, item.buildUpon().setClippingConfiguration(MediaItem.ClippingConfiguration.UNSET).build())
-            }
+        for (k in 0 until player.mediaItemCount) {
+            if (k == cur) continue
+            val item = player.getMediaItemAt(k)
+            if (builtPrev(item).isNotEmpty() || builtNext(item).isNotEmpty()) rebuild(k, item, "", "")
         }
     }
 }

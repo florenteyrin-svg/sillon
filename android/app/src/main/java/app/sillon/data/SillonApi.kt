@@ -189,6 +189,14 @@ class SillonApi(private val settings: Settings) {
     suspend fun mixTransition(from: String, to: String): MixTransition =
         json.decodeFromString(api("GET", "/api/mix/transition?from=$from&to=$to"))
 
+    /** One song of the DJ mix as a single continuous file (see the server's /api/mix/segment). */
+    fun segmentUrl(song: String, prev: String, next: String): String {
+        val b = "$base/api/mix/segment".toHttpUrl().newBuilder().addQueryParameter("song", song)
+        if (prev.isNotEmpty()) b.addQueryParameter("prev", prev)
+        if (next.isNotEmpty()) b.addQueryParameter("next", next)
+        return withKey(b)
+    }
+
     fun serverUrl(path: String): String = withKey("$base$path".toHttpUrl().newBuilder())
 
     suspend fun jobs(): List<DownloadJob> {
