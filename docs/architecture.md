@@ -128,6 +128,16 @@ Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband).
    coupure entre deux titres. Le titre en cours au moment d'activer le mix garde sa fin normale.
 4. Passages gardés 14 jours, segments 1 jour, dans `<cache>/mix`. Les FLAC ne sont jamais touchés.
 
-Mesures (morceaux de test, attaques mesurées dans l'audio produit) : de 92,3 à 128,4 BPM, écart moyen
-entre les temps des deux titres ~1 ms (au pire ~10 ms) pendant toute la rampe ; raccords entre segments
-sans saut de signal ; ~50 s de calcul par passage sur un processeur 4 cœurs sans carte graphique.
+Mesures :
+- morceaux de synthèse de 92,3 à 128,4 BPM : temps des deux titres à ~1 ms l'un de l'autre pendant toute
+  la rampe ; raccords entre segments sans saut de signal ;
+- vrais morceaux (Kevin MacLeod, incompetech.com, CC BY 4.0 : Hustle, Werq, Raving Energy, Electro Cabello,
+  Monkeys Spinning Monkeys, Funkorama), rampes jusqu'à 101 → 122 et 117 → 144 BPM : temps de chaque titre à
+  < 10 ms de la grille commune (médiane) ;
+- ~40 s de calcul par passage sur un processeur 4 cœurs sans carte graphique.
+
+Réglages issus de ces mesures : la confiance dans le tempo est le contraste du tempo trouvé avec ses
+voisins (vrais morceaux 3 à 15, sans rythme < 2) et l'accord des deux moitiés de l'extrait ; la position
+des temps est le point où les attaques graves s'empilent quand tous les temps sont repliés sur un seul
+(une moyenne de toutes les attaques était décalée jusqu'à 100 ms par les contretemps) ; l'étirement
+utilise le moteur R2 de rubberband (le moteur R3 dérive jusqu'à 100 ms sur une forte rampe).

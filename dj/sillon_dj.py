@@ -35,6 +35,7 @@ SR = 44100
 WINDOW = 50.0  # seconds decoded at each side
 BARS = 16
 MAX_TEMPO_RATIO = 1.6  # beyond this (after double/half time), a crossfade instead of a beat-matched mix
+MIN_BEAT_CONTRAST = 2.5  # how much the found tempo must stand out (real songs: 3 to 15, beatless: < 2)
 JOIN = 0.05  # seconds: both ends of a transition melt into the original songs (sample-exact joins)
 
 log = logging.getLogger("sillon-dj")
@@ -104,6 +105,24 @@ class Grid:
         return self.phase + k * self.period
 
 
+def beat_phase(mono, period):
+    """Where in the beat the hits land: every beat of the excerpt is folded onto one, and the position
+    where the low (kick) and overall attacks pile up most is the beat. Off-beat hats or syncopated notes
+    spread out over the fold and do not pull it (a weighted average of all onsets would)."""
+    import librosa
+
+    hop = 64  # 1.5 ms resolution
+    fps = SR / hop
+    low = librosa.onset.onset_strength(y=mono, sr=SR, hop_length=hop, fmax=250, n_mels=6)
+    full = librosa.onset.onset_strength(y=mono, sr=SR, hop_length=hop)
+    env = low / (low.max() + 1e-9) + 0.5 * full / (full.max() + 1e-9)
+    bins = 240
+    pos = ((np.arange(len(env)) / fps) % period) / period
+    fold = np.bincount((pos * bins).astype(int) % bins, weights=env, minlength=bins)
+    fold = np.convolve(np.concatenate([fold[-3:], fold, fold[:3]]), np.ones(5) / 5, mode="same")[3:-3]
+    return float(np.argmax(fold) / bins * period)
+
+
 def beat_grid(x):
     """Finds tempo and beat phase to a fraction of a millisecond: the onsets of the whole excerpt vote for
     every candidate period (phase coherence), so small errors average out over dozens of beats."""
@@ -135,12 +154,25 @@ def beat_grid(x):
         score = np.abs(z) / w.sum()
         i = int(np.argmax(score))
         if best is None or score[i] > best[0] * 1.15:
-            best = (float(score[i]), float(periods[i]), complex(z[i]))
-    strength, period, z = best
-    phase = (np.angle(z) / (2 * np.pi)) * period % period
+            # contrast: how much this tempo stands out from its neighbours (real music has many off-beat
+            # onsets, so the raw coherence is low even with a perfectly steady beat)
+            best = (float(score[i]), float(periods[i]), complex(z[i]), float(score[i] / (np.median(score) + 1e-9)))
+    coherence, period, z, contrast = best
+
+    # The two halves of the excerpt must agree on the tempo (a steady beat, not a lucky match)
+    def half_period(sel):
+        bp = np.arange(60 / period * 0.99, 60 / period * 1.01, 0.002)
+        pr = 60.0 / bp
+        zz = np.exp(2j * np.pi * t[sel][None, :] / pr[:, None]) @ w[sel]
+        return float(pr[int(np.argmax(np.abs(zz)))])
+    mid = t.max() / 2
+    p1, p2 = half_period(t < mid), half_period(t >= mid)
+    agree = abs(p1 - p2) / period
+    strength = contrast if agree < 0.012 else 0.0
+    phase = beat_phase(mono, period)
     # Downbeat: the beat position (of 4) where the harmony changes most and the kick is strongest
     chroma = librosa.feature.chroma_stft(y=mono, sr=SR, hop_length=HOP)
-    low = librosa.onset.onset_strength(y=mono, sr=SR, hop_length=HOP, fmax=150, n_mels=32)
+    low = librosa.onset.onset_strength(y=mono, sr=SR, hop_length=HOP, fmax=250, n_mels=6)
     nbeats = int((len(mono) / SR - phase) / period)
     scores = np.zeros(4)
     for k in range(1, nbeats):
@@ -190,6 +222,23 @@ def key_name(k):
     return _NAMES[k[0]] + ("m" if k[1] else "")
 
 
+def beat_offset_ms(x, beats):
+    """Median distance (ms) between the strongest onset near each expected beat and that beat."""
+    import librosa
+
+    env = librosa.onset.onset_strength(y=x.mean(axis=0), sr=SR, hop_length=128)
+    fps = SR / 128
+    offs = []
+    for k in range(len(beats) - 1):
+        half = (beats[k + 1] - beats[k]) / 4
+        f0, f1 = int((beats[k] - half) * fps), int((beats[k] + half) * fps)
+        if f0 < 0 or f1 >= len(env):
+            continue
+        j = f0 + int(np.argmax(env[f0:f1]))
+        offs.append((j / fps - beats[k]) * 1000)
+    return round(float(np.median(offs)), 1) if offs else None
+
+
 def beat_multiple(pa, pb):
     """B's beats grouped (x2) or split (x0.5) so its pulse is closest to A's: 70 BPM rap against 140 BPM
     techno is matched beat for 2 beats, like a DJ would."""
@@ -209,7 +258,8 @@ def read_wav(path):
 
 def stretch_to_beats(x, src_beats, dst_beats, n_out, workdir, name):
     """Time-stretches x (pitch kept) so the beat at src_beats[k] (seconds in x) lands at dst_beats[k] in the
-    output: a varying tempo, beat by beat (rubberband key-frame map)."""
+    output: a varying tempo, beat by beat (rubberband key-frame map). The standard engine (R2) is used:
+    the finer R3 engine drifts by up to 100 ms on strong tempo changes (measured)."""
     src = os.path.join(workdir, name + "-in.wav")
     dst = os.path.join(workdir, name + "-out.wav")
     tmap = os.path.join(workdir, name + ".map")
@@ -217,7 +267,7 @@ def stretch_to_beats(x, src_beats, dst_beats, n_out, workdir, name):
     with open(tmap, "w") as f:
         for s_, d_ in zip(src_beats, dst_beats):
             f.write(f"{int(round(s_ * SR))} {int(round(d_ * SR))}\n")
-    subprocess.run(["rubberband", "-q", "-3", "--timemap", tmap, "-D", f"{n_out / SR:.6f}", src, dst],
+    subprocess.run(["rubberband", "-q", "--timemap", tmap, "-D", f"{n_out / SR:.6f}", src, dst],
                    check=True, capture_output=True)
     y = read_wav(dst)
     if y.shape[1] < n_out:
@@ -335,7 +385,7 @@ def plan_and_render(sep, a_path, b_path, workdir="/tmp"):
     ga = beat_grid(a)
     gb = beat_grid(b_probe[:, b_first:])
     meta = {}
-    if ga is None or gb is None or ga.strength < 0.25 or gb.strength < 0.25:
+    if ga is None or gb is None or ga.strength < MIN_BEAT_CONTRAST or gb.strength < MIN_BEAT_CONTRAST:
         meta["reason"] = "no steady beat"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
     pa = ga.period
@@ -384,6 +434,10 @@ def plan_and_render(sep, a_path, b_path, workdir="/tmp"):
     src_b = np.arange(nb + 1) * pb
     a_seg = stretch_to_beats(a_in, src_a, out_beats, n, workdir, "a")
     b_seg = stretch_to_beats(b_in_audio, src_b, out_beats, n, workdir, "b")
+
+    # Self-check: where do each song's onsets fall relative to the shared beat grid? (diagnostic in the log)
+    meta["syncA_ms"] = beat_offset_ms(a_seg, out_beats)
+    meta["syncB_ms"] = beat_offset_ms(b_seg, out_beats)
 
     sa = sep.split(a_seg)
     sb = sep.split(b_seg)
@@ -499,7 +553,9 @@ class Worker:
                 write_flac(mix, os.path.join(job["out"], job["key"] + ".flac"), SR)
                 meta.update({"status": "done", "aOut": round(a_out, 4), "bIn": round(b_in, 4),
                              "length": round(mix.shape[1] / SR, 3), "seconds": round(time.time() - t0, 1)})
-                log.info("%s: %s in %.1fs", job["key"], meta["style"], meta["seconds"])
+                log.info("%s: %s in %.1fs (%s)", job["key"], meta["style"], meta["seconds"],
+                         ", ".join(f"{k}={v}" for k, v in meta.items() if k in (
+                             "bpmFrom", "bpmTo", "tempoA", "tempoB", "keyA", "keyB", "bars", "syncA_ms", "syncB_ms", "reason")))
             except Exception as e:  # noqa: BLE001
                 log.exception("%s failed", job["key"])
                 meta = {"status": "failed", "error": str(e)[:300]}
