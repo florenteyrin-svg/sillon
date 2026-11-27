@@ -175,13 +175,13 @@ fun SongsScreen() {
         item {
             BackBar(); ScreenTitle("Titres")
             PlayButtons(
-                onPlay = { ctx.play(songs.map { it.toQueueTrack() }) },
+                onPlay = { ctx.play(songs.map { it.toQueueTrack() }, mixable = true) },
                 onShuffle = { ctx.scope.launchShuffleAll(ctx) },
             )
         }
         itemsIndexed(songs, key = { _, s -> s.id }) { i, s ->
             TrackRow(s.title, "${s.artist} · ${s.album}", ctx.api.coverUrl(s.albumId, 150), s.quality) {
-                ctx.play(songs.map { it.toQueueTrack() }, i)
+                ctx.play(songs.map { it.toQueueTrack() }, i, mixable = true)
             }
         }
     }
@@ -190,7 +190,7 @@ fun SongsScreen() {
 /** Shuffle the whole library: a random selection from the server, so it starts at once. */
 private fun CoroutineScope.launchShuffleAll(ctx: AppContext) {
     launch {
-        runCatching { ctx.api.randomSongs(300) }.onSuccess { ctx.play(it.map { s -> s.toQueueTrack() }) }
+        runCatching { ctx.api.randomSongs(300) }.onSuccess { ctx.play(it.map { s -> s.toQueueTrack() }, mixable = true) }
             .onFailure { ctx.toast.value = it.message }
     }
 }
@@ -204,7 +204,7 @@ fun StarredScreen() {
         val list = songs.orEmpty()
         if (list.isEmpty()) item { Message("Pas encore de favoris") }
         itemsIndexed(list, key = { _, s -> s.id }) { i, s ->
-            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(list.map { it.toQueueTrack() }, i) }
+            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(list.map { it.toQueueTrack() }, i, mixable = true) }
         }
     }
 }
@@ -290,10 +290,11 @@ fun PlaylistScreen(id: String) {
                 Text((if (p.smart) "Playlist intelligente · " else "") + "${p.entry.size} titres · ${formatDuration(p.duration)}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            PlayButtons(onPlay = { ctx.play(p.entry.map { it.toQueueTrack() }) }, onShuffle = { ctx.play(p.entry.map { it.toQueueTrack() }, shuffle = true) })
+            PlayButtons(onPlay = { ctx.play(p.entry.map { it.toQueueTrack() }, mixable = true) },
+                onShuffle = { ctx.play(p.entry.map { it.toQueueTrack() }, shuffle = true, mixable = true) })
         }
         itemsIndexed(p.entry, key = { i, s -> "$i-${s.id}" }) { i, s ->
-            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(p.entry.map { it.toQueueTrack() }, i) }
+            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(p.entry.map { it.toQueueTrack() }, i, mixable = true) }
         }
     }
 }

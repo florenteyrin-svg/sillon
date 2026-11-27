@@ -46,9 +46,16 @@ class AppContext(
         showPlayer.value = true
     }
 
-    fun play(tracks: List<QueueTrack>, start: Int = 0, shuffle: Boolean = false) {
+    /**
+     * [mixable]: played from a playlist or all songs, so the DJ mix may join the songs (never for albums).
+     * Shuffle reorders the list here, so the DJ mix knows the real next song.
+     */
+    fun play(tracks: List<QueueTrack>, start: Int = 0, shuffle: Boolean = false, mixable: Boolean = false) {
         if (tracks.isEmpty()) return
-        player.play(tracks, start, shuffle)
+        var list = tracks.map { it.copy(mixable = mixable) }
+        var first = start
+        if (shuffle) { list = list.shuffled(); first = 0 }
+        player.play(list, first, false)
     }
 
     fun playRecent(items: List<RecentItem>, index: Int) {
@@ -57,7 +64,7 @@ class AppContext(
                 appleArtwork(it.artwork), it.duration.toInt())
             else QueueTrack(it.id, it.title, it.artist, it.album, it.albumId ?: "", null, it.duration.toInt(), it.quality ?: "")
         }
-        player.play(tracks, index)
+        player.play(tracks.map { it.copy(mixable = !it.isCatalog) }, index)
     }
 
     fun download(type: String, id: String, albumId: String? = null, onDone: (Boolean) -> Unit = {}) {

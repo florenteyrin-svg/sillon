@@ -100,7 +100,7 @@ fun SearchScreen() {
             }
             itemsIndexed(lib.songs, key = { _, s -> "s-" + s.id }) { i, s ->
                 TrackRow(s.title, "Titre · ${s.artist}", ctx.api.coverUrl(s.albumId, 150), s.quality) {
-                    ctx.play(lib.songs.map { it.toQueueTrack() }, i)
+                    ctx.play(lib.songs.map { it.toQueueTrack() }, i, mixable = true)
                 }
             }
         }

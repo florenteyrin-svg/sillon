@@ -62,6 +62,8 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 | POST | `/api/catalog/play` | Écoute directe d'un titre Apple Music `{"id","albumId","title","artist","album","artwork","duration"}` → `{"url"}` |
 | GET | `/api/catalog/stream/{id}` | Le son du titre (MP4/ALAC), envoyé pendant qu'il se télécharge, puis depuis le cache |
 | GET | `/api/recent` | Récemment écoutés : titres de la bibliothèque et du catalogue mélangés |
+| GET | `/api/mix/transition?from=&to=` | Passage Mix DJ entre deux titres : `{"status","aOut","bIn","url","style"}` |
+| GET | `/api/mix/file/{key}` | Le passage (FLAC) |
 | GET/POST | `/api/smart-playlists` | Liste / création `{"name","rules"}` |
 | PUT | `/api/smart-playlists/{id}` | Modification |
 | POST | `/api/smart-playlists/preview` | Nombre de titres d'un jeu de règles |
@@ -102,14 +104,23 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 4. Le cache garde sa taille sous `SILLON_CACHE_MAX_GB` (10 Go) : les titres écoutés le moins récemment
    partent en premier. Télécharger un titre avec la flèche le retire du cache.
 
-## Suite : mix DJ
+## Mix DJ
 
-Pas pendant la lecture sur le téléphone, et pas besoin d'analyser toute la bibliothèque d'avance :
+Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband via ffmpeg).
 
-1. **Analyse légère de chaque titre** (tempo, tonalité, début/fin réels, fin des voix) :
-   ~1–2 s par titre, une fois, puis à chaque ajout.
-2. **Séparation voix / batterie / basse / mélodie seulement sur la zone de transition**
-   (~45 s de fin + ~45 s de début), préparée pendant que le titre précédent joue,
-   sur la Quadro si elle est libre, sinon sur le processeur.
-3. Le serveur rend le passage mixé ; le téléphone enchaîne fin du titre A → transition → titre B.
-4. Cache limité en taille (les transitions les plus anciennes sont effacées), les FLAC ne sont jamais touchés.
+1. L'appli demande `GET /api/mix/transition?from=<titre en cours>&to=<suivant>` (et la suivante d'avance).
+   Sillon transmet au conteneur DJ, qui calcule en tâche de fond ; l'appli redemande jusqu'à `done`.
+2. Seules la fin de A (~50 s, silence final coupé) et le début de B (~50 s) sont traités :
+   - tempo et battements (librosa) ; si les tempos sont proches (8 %, double/demi-temps compris), B est
+     étiré au tempo de A sans changer sa hauteur (rubberband) ;
+   - séparation voix / batterie / basse / reste (Demucs `htdemucs`, carte NVIDIA si utilisable, sinon
+     processeur ; si la carte est occupée, par Jellyfin par exemple, le processeur prend le relais) ;
+   - mix sur 16 mesures calé sur les temps : la batterie de B arrive, les basses s'échangent à la 8e mesure,
+     la mélodie de A s'en va, la voix de A continue sur la musique de B puis la voix de B prend le relais ;
+   - le passage commence exactement sur le son d'origine de A et finit sur B à sa vitesse normale.
+   - Tempos trop différents : fondu enchaîné de 10 s.
+3. Réponse : `aOut` (où quitter A), `bIn` (où reprendre B), `url` du passage (FLAC, `/api/mix/file/…`).
+4. L'appli joue A coupé à `aOut` → le passage → B à partir de `bIn`.
+5. Les passages sont gardés dans `<cache>/mix`, effacés après 14 jours sans écoute. Les FLAC ne sont jamais touchés.
+
+Mesure : ~30–40 s de calcul par passage sur un processeur 4 cœurs, sans carte graphique.

@@ -15,6 +15,7 @@ services:
       - ALACARTE_USER=${ALACARTE_USER:-}
       - ALACARTE_PASSWORD=${ALACARTE_PASSWORD:-}
       - SILLON_CACHE_MAX_GB=${SILLON_CACHE_MAX_GB:-10}
+      - SILLON_DJ_URL=http://sillon-dj:8085
       - TZ=${TZ:-Europe/Paris}
     volumes:
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/music:ro   # Sillon never changes your files
@@ -23,6 +24,27 @@ services:
     ports:
       - "${SILLON_PORT:-4747}:4747"
     networks: [default]
+
+  # ---- DJ mix: prepares the transitions (tempo, voice/drums/bass separation, vocal swap) ----
+  sillon-dj:
+    image: ghcr.io/florenteyrin-svg/sillon-dj:latest
+    container_name: sillon-dj
+    restart: unless-stopped
+    user: "${PUID:-0}:${PGID:-0}"
+    environment:
+      - SILLON_DJ_DEVICE=${SILLON_DJ_DEVICE:-auto}   # auto = the NVIDIA card when usable, else the CPU
+    volumes:
+      - ${MUSIC_PATH}:/music:ro
+      - ${SILLON_CACHE_PATH:-./data/cache}:/cache
+    networks: [default]
+    # NVIDIA card (the one Jellyfin already uses). Without one, delete these 6 lines and set SILLON_DJ_DEVICE=cpu.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # ---- à la carte (Apple Music downloads): your own version, in the alacarte/ folder ----
   alacarte-wrapper:

@@ -24,12 +24,14 @@ data class QueueTrack(
     val duration: Int = 0,
     val quality: String = "",
     val animatedCover: Boolean = false,
+    val mixable: Boolean = false, // played from a playlist or all songs: the DJ mix may join it to the next
 ) {
     val isCatalog: Boolean get() = id.startsWith(CATALOG_PREFIX)
     val appleId: String get() = id.removePrefix(CATALOG_PREFIX)
 }
 
-fun Song.toQueueTrack() = QueueTrack(id, title, artist, album, albumId, null, duration, quality, animatedCover)
+fun Song.toQueueTrack(mixable: Boolean = false) =
+    QueueTrack(id, title, artist, album, albumId, null, duration, quality, animatedCover, mixable)
 
 fun CatalogSong.toQueueTrack() = QueueTrack(
     CATALOG_PREFIX + id, name, artistName, albumName, albumId ?: "", appleArtwork(artworkTemplate),
@@ -41,6 +43,8 @@ object Extras {
     const val ANIMATED = "sillon.animated"
     const val ALBUM_ID = "sillon.albumId"
     const val CATALOG = "sillon.catalog"
+    const val MIXABLE = "sillon.mixable"
+    const val TRANSITION = "sillon.transition"
 }
 
 fun QueueTrack.toMediaItem(api: SillonApi): MediaItem {
@@ -49,6 +53,7 @@ fun QueueTrack.toMediaItem(api: SillonApi): MediaItem {
         putBoolean(Extras.ANIMATED, animatedCover)
         putString(Extras.ALBUM_ID, albumId)
         putBoolean(Extras.CATALOG, isCatalog)
+        putBoolean(Extras.MIXABLE, mixable)
     }
     val art = artwork ?: api.coverUrl(albumId.ifEmpty { id }, 600)
     val meta = MediaMetadata.Builder()
@@ -80,8 +85,13 @@ fun MediaItem.toQueueTrack(): QueueTrack {
         duration = ((m.durationMs ?: 0L) / 1000).toInt(),
         quality = e?.getString(Extras.QUALITY) ?: "",
         animatedCover = e?.getBoolean(Extras.ANIMATED) ?: false,
+        mixable = e?.getBoolean(Extras.MIXABLE) ?: false,
     )
 }
+
+const val MIX_PREFIX = "mix:"
+
+val MediaItem.isTransition: Boolean get() = mediaId.startsWith(MIX_PREFIX)
 
 fun qualityLabel(q: String?): String? = when (q) {
     "hires" -> "Hi-Res"

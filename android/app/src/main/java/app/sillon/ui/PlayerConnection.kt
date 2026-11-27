@@ -10,6 +10,7 @@ import app.sillon.data.SillonApi
 import app.sillon.player.PlaybackService
 import app.sillon.player.QueueTrack
 import app.sillon.player.toMediaItem
+import app.sillon.player.isTransition
 import app.sillon.player.toQueueTrack
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
@@ -60,7 +61,10 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
 
     private fun refresh() {
         val c = controller ?: return
-        val queue = (0 until c.mediaItemCount).map { c.getMediaItemAt(it).toQueueTrack() }
+        // DJ transitions are part of the player's queue but not shown as songs
+        val items = (0 until c.mediaItemCount).map { c.getMediaItemAt(it) }
+        val queue = items.filter { !it.isTransition }.map { it.toQueueTrack() }
+        val index = items.take(c.currentMediaItemIndex.coerceAtLeast(0)).count { !it.isTransition }
         _state.value = PlayerState(
             current = c.currentMediaItem?.toQueueTrack(),
             isPlaying = c.isPlaying,
@@ -68,7 +72,7 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
             positionMs = c.currentPosition.coerceAtLeast(0),
             durationMs = c.duration.takeIf { it > 0 } ?: ((c.currentMediaItem?.mediaMetadata?.durationMs) ?: 0L),
             queue = queue,
-            index = c.currentMediaItemIndex,
+            index = index,
             shuffle = c.shuffleModeEnabled,
             repeatMode = c.repeatMode,
         )
@@ -106,7 +110,12 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
     fun next() { controller?.seekToNextMediaItem() }
     fun previous() { controller?.seekToPrevious() }
     fun seekTo(ms: Long) { controller?.seekTo(ms); refresh() }
-    fun skipTo(index: Int) { controller?.seekTo(index, 0); controller?.play() }
+    /** [index] counts songs only (DJ transitions are skipped). */
+    fun skipTo(index: Int) {
+        val c = controller ?: return
+        val real = (0 until c.mediaItemCount).filter { !c.getMediaItemAt(it).isTransition }.getOrNull(index) ?: return
+        c.seekTo(real, 0); c.play()
+    }
     fun setShuffle(on: Boolean) { controller?.shuffleModeEnabled = on }
     fun cycleRepeat() {
         val c = controller ?: return

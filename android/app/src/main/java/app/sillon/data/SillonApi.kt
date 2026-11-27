@@ -185,6 +185,12 @@ class SillonApi(private val settings: Settings) {
         })
     }
 
+    /** DJ transition from the playing song to the next one; ask again until status is "done". */
+    suspend fun mixTransition(from: String, to: String): MixTransition =
+        json.decodeFromString(api("GET", "/api/mix/transition?from=$from&to=$to"))
+
+    fun serverUrl(path: String): String = withKey("$base$path".toHttpUrl().newBuilder())
+
     suspend fun jobs(): List<DownloadJob> {
         val root = json.parseToJsonElement(api("GET", "/api/catalog/jobs")).jsonObject
         return root["jobs"]?.let { json.decodeFromJsonElement<List<DownloadJob>>(it) } ?: emptyList()

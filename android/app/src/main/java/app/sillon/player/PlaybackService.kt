@@ -44,6 +44,7 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var session: MediaLibrarySession
     private lateinit var api: SillonApi
     private lateinit var store: QueueStore
+    private lateinit var dj: DjMixer
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val handler = Handler(Looper.getMainLooper())
 
@@ -68,6 +69,8 @@ class PlaybackService : MediaLibraryService() {
             .build()
 
         restoreQueue()
+        dj = DjMixer(player, api, app.settings, scope)
+        handler.post(djTick)
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 saveQueue()
@@ -146,8 +149,20 @@ class PlaybackService : MediaLibraryService() {
 
     private fun saveQueue() {
         if (!::player.isInitialized) return
-        val tracks = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).toQueueTrack() }
-        store.save(SavedQueue(tracks, player.currentMediaItemIndex, player.currentPosition, player.shuffleModeEnabled, player.repeatMode))
+        // DJ transitions are not saved: they are prepared again when needed
+        val items = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
+        val cur = player.currentMediaItemIndex
+        val index = items.take(cur.coerceAtLeast(0)).count { !it.isTransition }
+        val onTransition = items.getOrNull(cur)?.isTransition == true
+        val tracks = items.filter { !it.isTransition }.map { it.toQueueTrack() }
+        store.save(SavedQueue(tracks, index, if (onTransition) 0 else player.currentPosition, player.shuffleModeEnabled, player.repeatMode))
+    }
+
+    private val djTick = object : Runnable {
+        override fun run() {
+            runCatching { dj.tick() }
+            handler.postDelayed(this, 500)
+        }
     }
 
     private val periodicSave = object : Runnable {
@@ -159,9 +174,10 @@ class PlaybackService : MediaLibraryService() {
 
     /** The server keeps it too, to resume on another device. */
     private fun saveQueueToServer() {
-        val ids = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }.filter { !it.startsWith(CATALOG_PREFIX) }
+        val ids = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
+            .filter { !it.startsWith(CATALOG_PREFIX) && !it.startsWith(MIX_PREFIX) }
         val current = player.currentMediaItem?.mediaId ?: return
-        if (current.startsWith(CATALOG_PREFIX) || ids.isEmpty()) return
+        if (current.startsWith(CATALOG_PREFIX) || current.startsWith(MIX_PREFIX) || ids.isEmpty()) return
         val pos = player.currentPosition
         scope.launch(Dispatchers.IO) { runCatching { api.savePlayQueue(ids, current, pos) } }
     }
@@ -169,7 +185,7 @@ class PlaybackService : MediaLibraryService() {
     /** A library song counts as played once it has played 30 seconds. */
     private fun scheduleScrobble(item: MediaItem?) {
         val id = item?.mediaId ?: return
-        if (id.startsWith(CATALOG_PREFIX)) return
+        if (id.startsWith(CATALOG_PREFIX) || id.startsWith(MIX_PREFIX)) return
         handler.postDelayed({
             if (player.currentMediaItem?.mediaId == id && player.currentPosition >= 25_000) {
                 scope.launch(Dispatchers.IO) { runCatching { api.scrobble(id) } }

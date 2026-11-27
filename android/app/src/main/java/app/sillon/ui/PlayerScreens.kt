@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -192,8 +193,35 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                         tint = if (s.repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f))
                 }
             }
+            // DJ mix: for playlists and all songs, never albums
+            if (t.mixable) DjButton()
             Spacer(Modifier.height(12.dp))
         }
+    }
+}
+
+@Composable
+private fun DjButton() {
+    val ctx = LocalApp.current
+    var on by remember { mutableStateOf(ctx.app.settings.djEnabled) }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(if (on) Color(0xFF8B5CF6).copy(alpha = 0.35f) else Color.White.copy(alpha = 0.12f))
+            .clickable {
+                on = !on
+                ctx.app.settings.djEnabled = on
+                ctx.toast.value = if (on) "Mix DJ activé : les transitions se préparent sur le serveur" else "Mix DJ désactivé"
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(Icons.Filled.Tune, null, tint = if (on) Color(0xFFD6BCFA) else Color.White)
+        Column(Modifier.weight(1f)) {
+            Text("Mix DJ", color = Color.White, fontWeight = FontWeight.Bold)
+            Text(if (on) "La voix passe d'un titre à l'autre, comme un DJ" else "Enchaîne les titres comme un DJ",
+                color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodyMedium)
+        }
+        androidx.compose.material3.Switch(checked = on, onCheckedChange = null)
     }
 }
 

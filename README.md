@@ -17,6 +17,9 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
 - **Écoute directe depuis la recherche Apple Music** : appuyer sur un titre le lance en quelques secondes,
   pendant qu'il se télécharge dans un cache à part (hors de ton dossier de musiques, 10 Go max, les plus
   anciens effacés). La flèche le télécharge pour de bon dans ta bibliothèque.
+- **Mix DJ** (bouton dans l'appli, playlists et « Tous les titres », jamais les albums) : la voix du titre
+  qui se termine continue sur la musique du suivant, calée sur le tempo. Le serveur ne traite que la fin
+  d'un titre et le début du suivant, pendant la lecture (conteneur `sillon-dj`, carte NVIDIA si possible).
 - **Pochettes animées** comme Apple Music : celles qu'à la carte enregistre sont fournies à l'appli.
 - **Playlists intelligentes** calculées en quelques millisecondes.
 - **Reprise de lecture** sur n'importe quel appareil (file d'attente et position gardées par le serveur).
@@ -97,5 +100,5 @@ signature est enregistrée dans les secrets du dépôt (`SILLON_KEYSTORE_B64`, `
 1. ~~Serveur : bibliothèque, ajout instantané, Subsonic, à la carte, playlists intelligentes~~
 2. Appli Android : ~~lecture, bibliothèque, recherche Apple Music, Android Auto, file gardée~~ ;
    à venir : widget vinyle, envoi vers Music Assistant, playlists hors ligne, paroles
-3. Mix DJ (bouton) : tempo, tonalité, transitions vocales préparées par le serveur
+3. ~~Mix DJ : tempo, transitions vocales préparées par le serveur~~ ; à venir : ordre selon la tonalité
 4. Appli Windows, carte simple pour le mur Home Assistant
