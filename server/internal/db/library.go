@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"log"
 	"path"
 	"time"
 )
@@ -58,7 +59,8 @@ func QualityOf(lossless bool, bitDepth, sampleRate int) string {
 
 // FillIDs computes the track, artist and album ids from its tags and path.
 func (t *Track) FillIDs() {
-	t.ID = ID("tr-", t.Path)
+	// Exact path: on Linux "Album/a.flac" and "album/a.flac" are two different files
+	t.ID = ExactID("tr-", t.Path)
 	if t.AlbumArtist == "" {
 		t.AlbumArtist = t.Artist
 	}
@@ -113,7 +115,7 @@ func (d *DB) UpsertTracks(tracks []*Track) error {
 		album_artist=excluded.album_artist, album_artist_id=excluded.album_artist_id, track_no=excluded.track_no,
 		disc_no=excluded.disc_no, year=excluded.year, genre=excluded.genre, duration=excluded.duration,
 		suffix=excluded.suffix, codec=excluded.codec, lossless=excluded.lossless, bit_depth=excluded.bit_depth,
-		sample_rate=excluded.sample_rate, bitrate=excluded.bitrate, channels=excluded.channels,
+		id=excluded.id, sample_rate=excluded.sample_rate, bitrate=excluded.bitrate, channels=excluded.channels,
 		quality=excluded.quality, has_lyrics=excluded.has_lyrics`)
 	if err != nil {
 		return err
@@ -126,7 +128,8 @@ func (d *DB) UpsertTracks(tracks []*Track) error {
 		if _, err := stmt.Exec(t.ID, t.Path, t.Mtime, t.Size, t.Title, t.Artist, t.ArtistID, t.Album, t.AlbumID,
 			t.AlbumArtist, t.AlbumArtistID, t.TrackNo, t.DiscNo, t.Year, t.Genre, t.Duration, t.Suffix, t.Codec,
 			t.Lossless, t.BitDepth, t.SampleRate, t.Bitrate, t.Channels, t.Quality, t.HasLyrics, t.CreatedAt); err != nil {
-			return err
+			// One bad file must not stop the others (SQLite keeps the transaction going)
+			log.Printf("index: skip %s: %v", t.Path, err)
 		}
 	}
 	return tx.Commit()

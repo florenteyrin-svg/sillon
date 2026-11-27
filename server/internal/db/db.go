@@ -152,6 +152,8 @@ var migrations = []string{
 		PRIMARY KEY (user_id, apple_id)
 	);
 	CREATE INDEX catalog_plays_recent ON catalog_plays(user_id, played_at);`,
+	// Track ids now keep the path's letter case: index everything again with the new ids
+	`DELETE FROM tracks; DELETE FROM albums; DELETE FROM artists;`,
 }
 
 func (d *DB) migrate() error {
@@ -180,6 +182,12 @@ func (d *DB) migrate() error {
 		}
 	}
 	return nil
+}
+
+// ExactID is like ID but keeps the letter case (file paths are case sensitive).
+func ExactID(prefix string, parts ...string) string {
+	h := sha1.Sum([]byte(strings.Join(parts, "\x00")))
+	return prefix + hex.EncodeToString(h[:8])
 }
 
 // ID builds a short stable id with a type prefix (tr-, al-, ar-) from the given parts.
