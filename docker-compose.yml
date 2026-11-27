@@ -1,0 +1,87 @@
+# Sillon + à la carte, in one stack. Start with:  docker compose up -d
+# Settings live in .env (copy .env.example). Only Sillon needs a domain in Nginx Proxy Manager.
+name: sillon
+
+services:
+  sillon:
+    image: ghcr.io/florenteyrin-svg/sillon:latest
+    container_name: sillon
+    restart: unless-stopped
+    user: "${PUID:-0}:${PGID:-0}"
+    environment:
+      - SILLON_ADMIN_USER=${SILLON_ADMIN_USER:-admin}
+      - SILLON_ADMIN_PASSWORD=${SILLON_ADMIN_PASSWORD:-}
+      - ALACARTE_URL=http://alacarte-web:7373
+      - ALACARTE_USER=${ALACARTE_USER:-}
+      - ALACARTE_PASSWORD=${ALACARTE_PASSWORD:-}
+      - TZ=${TZ:-Europe/Paris}
+    volumes:
+      - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/music:ro   # Sillon never changes your files
+      - ${SILLON_DATA_PATH:-./data/sillon}:/data
+    ports:
+      - "${SILLON_PORT:-4747}:4747"
+    networks: [sillon]
+
+  # ---- à la carte (Apple Music downloads), built from its repository, unchanged ----
+  alacarte-wrapper:
+    build:
+      context: https://github.com/norifm/alacarte.git#main:wrapper
+    image: alacarte-wrapper:local
+    pull_policy: build
+    container_name: alacarte-wrapper
+    platform: linux/amd64
+    entrypoint: ["/app/wrapper-entrypoint.sh"]
+    command: ["-H", "0.0.0.0"]
+    environment:
+      - LD_PRELOAD=/app/libwrapper_login_fix.so
+      - SUPERVISOR_TOKEN_FILE=/app/supervisor-secret/token
+      - PUID=${PUID:-}
+      - PGID=${PGID:-}
+    volumes:
+      - ${ALACARTE_DATA_PATH:-./data/alacarte}/wrapper:/app/rootfs/data
+      - ${ALACARTE_DATA_PATH:-./data/alacarte}/supervisor:/app/supervisor-secret
+      - /dev/null:/app/rootfs/dev/null
+      - /dev/urandom:/app/rootfs/dev/urandom
+      - /dev/random:/app/rootfs/dev/random
+      - /dev/zero:/app/rootfs/dev/zero
+    expose: ["10020", "20020", "30020", "40020"]
+    networks: [sillon]
+    restart: on-failure
+
+  alacarte-web:
+    build:
+      context: https://github.com/norifm/alacarte.git#main
+      dockerfile: backend/Dockerfile
+    image: alacarte-web:local
+    pull_policy: build
+    container_name: alacarte-web
+    platform: linux/amd64
+    depends_on: [alacarte-wrapper]
+    environment:
+      - PORT=7373
+      - AMDL_WRAPPER_HOST=alacarte-wrapper
+      - AMDL_WRAPPER_DECRYPT_PORT=10020
+      - AMDL_WRAPPER_M3U8_PORT=20020
+      - AMDL_WRAPPER_ACCOUNT_PORT=30020
+      - AMDL_WRAPPER_SUPERVISOR_PORT=40020
+      - AMDL_SUPERVISOR_TOKEN_FILE=/supervisor-secret/token
+      - AMDL_MUSIC_PATH=/music
+      - AMDL_CONFIG_DIR=/config
+      - AMDL_SECRET_KEY=${AMDL_SECRET_KEY:-}
+      - AUTH_DISABLED=false
+      - TRUST_PROXY=loopback
+      - PUID=${PUID:-}
+      - PGID=${PGID:-}
+    volumes:
+      - ${ALACARTE_DATA_PATH:-./data/alacarte}/web:/config
+      - ${ALACARTE_DATA_PATH:-./data/alacarte}/supervisor:/supervisor-secret:ro
+      - ${MUSIC_PATH}:/music
+    # Its own page, for the Apple sign-in and its settings: home network only, no domain needed.
+    ports:
+      - "${ALACARTE_PORT:-7373}:7373"
+    networks: [sillon]
+    restart: unless-stopped
+
+networks:
+  sillon:
+    name: sillon
