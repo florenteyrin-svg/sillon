@@ -104,14 +104,24 @@ class DjMixer(
         player.addMediaItem(y, transition)
 
         val bClip = b.clippingConfiguration.buildUpon().setStartPositionMs(bInMs).build()
-        player.replaceMediaItem(y + 1, b.buildUpon().setClippingConfiguration(bClip).build())
+        swap(y + 1, b.buildUpon().setClippingConfiguration(bClip).build())
 
         if (aIsPlaying) {
             cut = a.mediaId to aOutMs
         } else {
             val aClip = a.clippingConfiguration.buildUpon().setEndPositionMs(aOutMs).build()
-            player.replaceMediaItem(x, a.buildUpon().setClippingConfiguration(aClip).build())
+            swap(x, a.buildUpon().setClippingConfiguration(aClip).build())
         }
+    }
+
+    /**
+     * Puts a new version of a queued song in place. replaceMediaItem() would keep the old source when the
+     * file is the same and ignore the new start/end points (the song then restarted from 0): remove + add
+     * makes the player build a clipped source.
+     */
+    private fun swap(index: Int, item: MediaItem) {
+        player.removeMediaItem(index)
+        player.addMediaItem(index, item)
     }
 
     private fun hasDjItems(): Boolean = (0 until player.mediaItemCount).any {
@@ -129,7 +139,7 @@ class DjMixer(
             if (item.isTransition) {
                 player.removeMediaItem(i)
             } else if (item.clippingConfiguration != MediaItem.ClippingConfiguration.UNSET) {
-                player.replaceMediaItem(i, item.buildUpon().setClippingConfiguration(MediaItem.ClippingConfiguration.UNSET).build())
+                swap(i, item.buildUpon().setClippingConfiguration(MediaItem.ClippingConfiguration.UNSET).build())
             }
         }
     }

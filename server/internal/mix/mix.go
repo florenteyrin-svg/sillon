@@ -15,7 +15,7 @@ import (
 )
 
 // Version is part of every transition's name: changing how transitions are made renders them again.
-const Version = "1"
+const Version = "2"
 
 type Client struct {
 	URL      string // e.g. http://sillon-dj:8085 (empty: DJ mix off)
