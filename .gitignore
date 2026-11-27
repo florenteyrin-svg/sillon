@@ -1,4 +1,4 @@
 .env
-data/
+/data/
 /server/sillon
 *.db
