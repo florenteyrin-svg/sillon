@@ -130,6 +130,7 @@ type ffprobeOut struct {
 		BitsPerSample    int    `json:"bits_per_sample"`
 		BitsPerRawSample string `json:"bits_per_raw_sample"`
 		SampleFmt        string `json:"sample_fmt"`
+		Profile          string `json:"profile"`
 		BitRate          string `json:"bit_rate"`
 		Tags             map[string]string `json:"tags"`
 	} `json:"streams"`
@@ -164,6 +165,8 @@ func probeFFprobe(full string, t *db.Track) error {
 		}
 		found = true
 		t.Codec = s.CodecName
+		t.Atmos = strings.Contains(strings.ToLower(s.Profile), "atmos") ||
+			((s.CodecName == "eac3" || s.CodecName == "truehd") && s.Channels > 2)
 		t.SampleRate, _ = strconv.Atoi(s.SampleRate)
 		t.Channels = s.Channels
 		t.BitDepth = s.BitsPerSample

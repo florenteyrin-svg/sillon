@@ -46,6 +46,36 @@ func (s *Scanner) rel(full string) (string, bool) {
 	return filepath.ToSlash(r), true
 }
 
+// IgnoreFile marks a folder Sillon must skip, with everything inside (same convention as Jellyfin):
+// à la carte puts one in "Mes Découvertes" and in the "cover" folders of animated covers.
+const IgnoreFile = ".ignore"
+
+func hasIgnoreFile(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, IgnoreFile))
+	return err == nil
+}
+
+// ignored tells whether a path is inside a folder marked with .ignore (checked up to the library root).
+func (s *Scanner) ignored(full string) bool {
+	dir := full
+	if info, err := os.Stat(full); err != nil || !info.IsDir() {
+		dir = filepath.Dir(full)
+	}
+	for {
+		if hasIgnoreFile(dir) {
+			return true
+		}
+		if dir == s.root || len(dir) <= len(s.root) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
 func isAudio(name string) bool {
 	if strings.HasPrefix(filepath.Base(name), ".") { // macOS "._" files and hidden temp files
 		return false
@@ -118,7 +148,7 @@ func (s *Scanner) Scan() error {
 			return nil
 		}
 		if d.IsDir() {
-			if p != s.root && strings.HasPrefix(d.Name(), ".") {
+			if p != s.root && (strings.HasPrefix(d.Name(), ".") || hasIgnoreFile(p)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -191,7 +221,20 @@ func (s *Scanner) UpdatePaths(fulls []string) {
 		if !ok {
 			continue
 		}
+		// A new .ignore file hides its whole folder
+		if filepath.Base(full) == IgnoreFile {
+			full = filepath.Dir(full)
+			if rel, ok = s.rel(full); !ok {
+				continue
+			}
+		}
 		info, err := os.Stat(full)
+		if err == nil && s.ignored(full) {
+			if n, err := s.db.DeletePaths([]string{rel}, true); err == nil && n > 0 {
+				removed = append(removed, rel)
+			}
+			continue
+		}
 		if err != nil { // deleted or renamed away: drop the file, or everything under the folder
 			if n, err := s.db.DeletePaths([]string{rel}, true); err == nil && n > 0 {
 				removed = append(removed, rel)
@@ -200,6 +243,9 @@ func (s *Scanner) UpdatePaths(fulls []string) {
 		}
 		if info.IsDir() {
 			filepath.WalkDir(full, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && d.IsDir() && p != full && (strings.HasPrefix(d.Name(), ".") || hasIgnoreFile(p)) {
+					return filepath.SkipDir
+				}
 				if err == nil && !d.IsDir() && isAudio(p) {
 					if r, ok := s.rel(p); ok {
 						if i, err := d.Info(); err == nil {

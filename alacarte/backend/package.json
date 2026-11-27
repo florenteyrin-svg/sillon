@@ -1,0 +1,20 @@
+{
+  "name": "alacarte-web",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Apple Music downloader web backend",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "lint:syntax": "node -e \"const{readdirSync,statSync}=require('fs');const p=require('path');const{spawnSync}=require('child_process');const w=(d)=>{for(const f of readdirSync(d)){const a=p.join(d,f);if(statSync(a).isDirectory())w(a);else if(a.endsWith('.mjs')){const r=spawnSync(process.execPath,['--check',a],{stdio:'inherit'});if(r.status!==0)process.exit(r.status)}}};w('lib');w('routes')\"",
+    "test": "npm run lint:syntax && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0"
+  }
+}

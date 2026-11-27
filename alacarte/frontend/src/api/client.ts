@@ -1,0 +1,1065 @@
+import type { Appearance, SeasonSetting } from '../lib/seasons'
+
+export type Album = {
+  id: string
+  name: string
+  artistName: string
+  artistId?: string | null
+  releaseDate?: string | null
+  year?: string | null
+  trackCount?: number
+  isSingle?: boolean
+  contentRating?: string
+  artworkTemplate: string | null
+  artworkColor?: string | null
+  url?: string
+  upc?: string | null
+}
+
+export type Artist = {
+  id: string
+  name: string
+  genreNames?: string[]
+  url?: string
+  artworkTemplate?: string | null
+  artworkColor?: string | null
+}
+
+export type Song = {
+  id: string
+  name: string
+  artistName: string
+  artistId?: string | null
+  albumName?: string
+  albumId?: string | null
+  durationMs?: number
+  artworkTemplate: string | null
+  isrc?: string | null
+}
+
+export type Playlist = {
+  id: string
+  name: string
+  curatorName: string
+  curatorId?: string | null
+  trackCount?: number
+  artworkTemplate: string | null
+  artworkColor?: string | null
+  url?: string
+  description?: string
+}
+
+export type BrowseHeader = {
+  id: string
+  name: string
+  description?: string
+  url?: string
+  artworkTemplate?: string | null
+  artworkColor?: string | null
+}
+
+export type PlaylistTrack = {
+  id: string
+  name: string
+  trackNumber?: number
+  durationMs?: number
+  artistName: string
+  artistId?: string | null
+  albumName?: string
+  artworkTemplate?: string | null
+  hasLossless?: boolean
+  hasHiRes?: boolean
+  hasAtmos?: boolean
+  isAppleDigitalMaster?: boolean
+}
+
+export type PlaylistDetail = Playlist & {
+  hasLossless: boolean
+  hasHiRes: boolean
+  hasAtmos: boolean
+  lastModifiedDate?: string
+  tracks: PlaylistTrack[]
+}
+
+export type LibraryPlaylistTrack = PlaylistTrack & {
+  libraryId: string
+  catalogId: string | null
+  downloadable: boolean
+}
+
+export type LibraryPlaylistDetail = {
+  libraryId: string
+  catalogId: string | null
+  name: string
+  curatorName: string
+  description: string
+  artworkTemplate: string | null
+  artworkColor: string | null
+  isUserCreated: boolean
+  trackCount: number
+  tracks: LibraryPlaylistTrack[]
+  hasLossless: boolean
+  hasHiRes: boolean
+  hasAtmos: boolean
+  undownloadableCount: number
+  downloadable: boolean
+}
+
+export type AlbumTrack = {
+  id: string
+  name: string
+  trackNumber?: number
+  discNumber?: number
+  durationMs?: number
+  artistName: string
+  isrc?: string | null
+  hasLossless?: boolean
+  hasHiRes?: boolean
+  hasAtmos?: boolean
+  isAppleDigitalMaster?: boolean
+  released?: boolean
+}
+
+export type AlbumDetail = Album & {
+  genreNames: string[]
+  artists?: Array<{ id: string; name?: string }>
+  recordLabel?: string
+  copyright?: string
+  upc?: string
+  hasLossless: boolean
+  hasHiRes: boolean
+  hasAtmos: boolean
+  isAppleDigitalMaster?: boolean
+  isPrerelease?: boolean
+  tracks: AlbumTrack[]
+}
+
+export type Job = {
+  id: string
+  kind: 'album' | 'song' | 'playlist'
+  status: 'queued' | 'running' | 'done' | 'failed'
+  progress: number
+  albumId: string
+  songId?: string | null
+  followedPlaylistId?: string | null
+  playlistId?: string | null
+  libraryPlaylistId?: string | null
+  albumTitle: string
+  artist: string
+  artistId?: string | null
+  artworkUrl?: string
+  currentTrack?: string | null
+  message?: string
+  error?: string | null
+  cancelled?: boolean
+  createdAt: number
+  updatedAt: number
+  finalDir?: string
+  quality?: QualityPreference
+  variant?: QualityGroup | null
+  stats?: { total?: number; done?: number; failed?: number; converted?: number }
+  queueSeq?: number
+  unavailable?: boolean
+}
+
+export type QualityPreference = 'flac' | 'alac' | 'atmos' | 'aac'
+export type QualityGroup = 'lossless' | 'atmos' | 'aac'
+
+export type BulkDownloadResult = {
+  requested: number
+  queued: number
+  skippedExisting: number
+  errors: Array<{ albumId: string; code: string | null; error: string }>
+}
+
+export type ImportFileCounts = {
+  links: number
+  playlists: number
+  albums: number
+  songs: number
+  artists: number
+  invalid: number
+  queued: number
+  skippedExisting: number
+  failed: Array<{ kind: string; id: string; error: string }>
+}
+
+export type ImportedFile = {
+  id: string
+  name: string
+  addedAt: number
+  lastRunAt: number | null
+  counts: ImportFileCounts
+}
+
+export type ReleaseScope = 'albums' | 'singles_eps' | 'everything'
+
+export type HealthReport = {
+  ok: boolean
+  wrapper: {
+    host: string
+    up?: boolean
+    stallActive?: boolean
+    stallRecent?: boolean
+    lastStallAt?: number | null
+    lastStallAbortedAt?: number | null
+    lastDownAt?: number | null
+    decrypt: { ok: boolean; error: string | null }
+    m3u8: { ok: boolean; error: string | null }
+    account: { ok: boolean; error: string | null }
+    supervisor?: {
+      mode: string
+      running: boolean
+      reason: 'lease_lost' | 'crashed' | 'exited' | null
+      restartInMs: number | null
+    } | null
+  }
+  appleToken: { ok: boolean; error: string | null }
+  music: { path: string; ok: boolean; error?: string }
+}
+
+export type PublicSettings = {
+  storefront: string
+  autoStorefront: boolean
+  language: string
+  quality: QualityPreference
+  convertToFlac: boolean
+  coverSize: string
+  downloadLyrics: boolean
+  promptForDownloadQuality: boolean
+  lyricsFormat: 'lrc' | 'ttml' | 'both'
+  lyricsType: 'lyrics' | 'lyrics-with-translation'
+  explicitFilter: 'explicit' | 'clean' | 'both'
+  appleEmailMasked: string | null
+  hasAppleCreds: boolean
+  hasMediaUserToken: boolean
+  hardBlockReason?: string | null
+  navidromeEnabled: boolean
+  navidromeUrl: string
+  navidromeUser: string | null
+  hasNavidromeCreds: boolean
+  octoIntegrationEnabled: boolean
+  hasOctoIntegrationToken: boolean
+  autoDownloadsEnabled: boolean
+  autoDownloadCheckFrequency: AutoCheckFrequency
+  stagingInsideMusicLibrary: boolean
+  namingConvention: 'apple' | 'qobuz'
+  versionOptionsEnabled: boolean
+  versionOptions: QualityGroup[]
+  uiLanguage: UiLanguage
+  season: SeasonSetting
+  appearance: Appearance
+  acceptedLanguages: string[]
+  namingLanguageMode: NamingLanguageMode
+}
+
+export type UiLanguage = 'system' | 'en' | 'zh' | 'zh-hant' | 'ja' | 'ko' | 'es' | 'fr'
+export type NamingLanguageMode = 'display' | 'original-if-accepted' | 'dual'
+
+export type AutoCheckFrequency =
+  | 'auto'
+  | '1h'
+  | '6h'
+  | '12h'
+  | 'daily'
+  | 'weekly'
+
+export type FollowedArtist = Artist & {
+  storefront: string
+  knownReleaseIds: string[]
+  latestReleaseDate: string | null
+  lastCheckedAt: number
+  followedAt: number
+  updatedAt: number
+  totalReleaseCount: number
+  missingReleaseCount: number
+  releaseScope: ReleaseScope
+  fullyDownloaded: boolean
+}
+
+export type FollowedPlaylist = {
+  id: string
+  libraryId: string | null
+  catalogId: string | null
+  name: string
+  curatorName: string
+  description: string
+  artworkTemplate: string | null
+  artworkColor: string | null
+  isUserCreated: boolean
+  storefront: string
+  knownTrackIds: string[]
+  lastCheckedAt: number
+  followedAt: number
+  updatedAt: number
+  totalTrackCount: number
+  missingTrackCount: number
+  undownloadableTrackCount: number
+  downloadableTrackCount: number
+  lastError: string | null
+  fullyDownloaded: boolean
+}
+
+export type PlaylistFollowResult = {
+  playlist: FollowedPlaylist | null
+  queued: number
+  failed: Array<{ trackId?: string; trackName?: string; error: string }>
+  existed?: boolean
+}
+
+export type LibrarySingle = {
+  id: string
+  artistName: string
+  artistId?: string | null
+  songName: string
+  relPath: string
+  hasLyrics: boolean
+  addedAt?: number
+}
+
+export type SearchOptions = {
+  types?: string
+  limit?: number
+  offset?: number
+}
+
+export type LibraryAlbum = {
+  id: string
+  artistName: string
+  artistId?: string | null
+  albumName: string
+  relPath: string
+  trackCount: number
+  lyricsCount: number
+  hasLyrics: boolean
+  addedAt?: number
+}
+
+export type LibraryPlaylist = {
+  id: string
+  relPath: string
+  fileName: string
+  playlistName: string
+  catalogPlaylistId: string | null
+  libraryPlaylistId: string | null
+  trackCount: number
+  addedAt?: number
+}
+
+export type CloudLibraryAlbum = {
+  libraryId: string
+  catalogId: string | null
+  name: string
+  artistName: string
+  artworkTemplate: string | null
+  artworkColor?: string | null
+  trackCount: number
+  dateAdded: string | null
+  upc?: string | null
+  downloadable: boolean
+}
+
+export type CloudLibraryPlaylist = {
+  libraryId: string
+  catalogId: string | null
+  name: string
+  curatorName: string
+  description?: string
+  artworkTemplate: string | null
+  artworkColor?: string | null
+  dateAdded: string | null
+  isUserCreated: boolean
+  downloadable: boolean
+}
+
+export type CloudLibrarySong = {
+  libraryId: string
+  catalogId: string | null
+  catalogAlbumId: string | null
+  name: string
+  artistName: string
+  albumName: string
+  durationMs: number
+  artworkTemplate: string | null
+  contentRating: string | null
+  isrc?: string | null
+  downloadable: boolean
+}
+
+export type CloudLibraryKind = 'albums' | 'playlists' | 'songs'
+
+export type CloudLibraryHealth = {
+  available: boolean
+  storefront?: string
+  reason?: 'no-media-user-token' | 'token-rejected' | 'probe-failed'
+  error?: string
+}
+
+export type CloudLibraryPage<T> = {
+  items: T[]
+  next: number | null
+  total: number | null
+}
+
+export type CloudDownloadAllResult = {
+  ok: true
+  kind: CloudLibraryKind
+  scanned: number
+  queued: number
+  skippedExisting: number
+  skippedQueued: number
+  unsupported: number
+  errorCount: number
+  errors: Array<{ libraryId: string; name: string; error: string }>
+}
+
+export type CloudDownloadAllProgress = {
+  kind: CloudLibraryKind
+  scanned: number
+  queued: number
+  skippedExisting?: number
+  unsupported?: number
+  total?: number | null
+  done: boolean
+}
+
+export type TagBackfillStatus = {
+  running: boolean
+  phase?: 'idle' | 'scanning' | 'matching' | 'waiting' | 'done'
+  albumsDone?: number
+  albumsTotal?: number
+  appleCalls?: number
+  cachedMisses?: number
+  waitingUntil?: number | null
+  dryRun: boolean
+  scanned: number
+  total: number
+  stamped: number
+  skipped: number
+  noMatch: number
+  failed: number
+  current: string | null
+  startedAt: number | null
+  finishedAt: number | null
+  stopRequested: boolean
+  error: string | null
+}
+
+export type LyricsBackfillStatus = {
+  running: boolean
+  waitingUntil?: number | null
+  scanned: number
+  total: number
+  added: number
+  converted?: number
+  skipped: number
+  noLyrics: number
+  noMatch: number
+  failed: number
+  current: string | null
+  startedAt: number | null
+  finishedAt: number | null
+  stopRequested: boolean
+  error: string | null
+}
+
+export type ClipJob = {
+  id: string
+  clipId: string
+  name: string
+  artistName: string
+  artwork: string | null
+  status: 'queued' | 'running' | 'done' | 'failed'
+  progress: number
+  message: string
+  error: string | null
+  file: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export type Clip = {
+  id: string
+  name: string
+  artistName: string
+  artistId: string | null
+  albumName: string | null
+  durationMs: number | null
+  releaseDate: string | null
+  year: string | null
+  has4K: boolean
+  hasHDR: boolean
+  contentRating: string | null
+  artwork: string | null
+  url: string | null
+  inLibrary: boolean
+  job?: ClipJob
+}
+
+export type ClipArtist = { id: string; name: string; artwork: string | null }
+
+export type AnimatedBackfillStatus = {
+  running: boolean
+  phase?: 'idle' | 'scanning' | 'matching' | 'waiting' | 'done'
+  waitingUntil?: number | null
+  scanned: number
+  total: number
+  added: number
+  skipped: number
+  noArtwork: number
+  noMatch: number
+  failed: number
+  current: string | null
+  startedAt: number | null
+  finishedAt: number | null
+  stopRequested: boolean
+  error: string | null
+}
+
+export type ArtistBackfillStatus = {
+  running: boolean
+  waitingUntil?: number | null
+  scanned: number
+  total: number
+  updated: number
+  skipped: number
+  noMatch: number
+  failed: number
+  current: string | null
+  startedAt: number | null
+  finishedAt: number | null
+  stopRequested: boolean
+  error: string | null
+}
+
+export type AppleStatus = {
+  state: 'ok' | 'cooldown' | 'probing'
+  cooldownSeconds: number
+  intervalMs: number
+  floorMs: number
+  learnedFloorMs: number
+  config: { enabled: boolean; paceIntegration: boolean; intervalMs: number; minIntervalMs: number; adaptive: boolean; cooldownMinutes: number }
+  inFlight: number
+  queued: { interactive: number; batch: number; background: number }
+  strikes: number
+  rateLimited24h: number
+  lastRateLimitedAt: number | null
+}
+
+export type AppleGatewaySettingsPatch = {
+  appleGatewayEnabled: boolean
+  appleGatewayPaceIntegration: boolean
+  appleGatewayIntervalMs: number | null
+  appleGatewayMinIntervalMs: number | null
+  appleGatewayAdaptive: boolean
+  appleGatewayCooldownMinutes: number | null
+}
+
+type UnauthorizedHandler = (info: { needsSetup: boolean }) => void
+
+let onUnauthorized: UnauthorizedHandler | null = null
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+  onUnauthorized = handler
+}
+
+export class HttpError extends Error {
+  status: number
+  needsSetup: boolean
+  retryAfter: number | null
+  lockedUntil: number | null
+  constructor(
+    status: number,
+    message: string,
+    needsSetup = false,
+    retryAfter: number | null = null,
+    lockedUntil: number | null = null,
+  ) {
+    super(message)
+    this.status = status
+    this.needsSetup = needsSetup
+    this.retryAfter = retryAfter
+    this.lockedUntil = lockedUntil
+  }
+}
+
+let setupToken: string | null = null
+
+export function setSetupToken(token: string | null) {
+  setupToken = token && token.trim() ? token.trim() : null
+}
+
+async function http<T>(
+  path: string,
+  opts: RequestInit = {},
+): Promise<T> {
+  const res = await fetch(path, {
+    credentials: 'include',
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(opts.headers || {}),
+    },
+  })
+  const text = await res.text()
+  let body: any = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    body = { raw: text }
+  }
+  if (!res.ok) {
+    if (res.status === 401) {
+      const needsSetup = Boolean(body?.needsSetup)
+      // Don't trip the auth overlay for the auth endpoints themselves —
+      // login/setup pages handle their own errors inline.
+      if (!path.startsWith('/api/auth/') && onUnauthorized) {
+        onUnauthorized({ needsSetup })
+      }
+      throw new HttpError(401, body?.error || 'unauthorized', needsSetup)
+    }
+    const msg = body?.error || `HTTP ${res.status}`
+    throw new HttpError(
+      res.status,
+      msg,
+      false,
+      typeof body?.retryAfter === 'number' ? body.retryAfter : null,
+      typeof body?.lockedUntil === 'number' ? body.lockedUntil : null,
+    )
+  }
+  return body as T
+}
+
+export type AuthState = {
+  authDisabled: boolean
+  passwordSet: boolean
+  authed: boolean
+  username: string | null
+  minPasswordLength: number
+  usernameMinLength: number
+  usernameMaxLength: number
+  requiresSetupToken?: boolean
+}
+
+export type WrapperLoginStatus =
+  | { inProgress: false }
+  | {
+      inProgress: true
+      status: {
+        phase: string
+        error?: string
+        tail?: string[]
+      }
+    }
+
+export const api = {
+  authState: () => http<AuthState>('/api/auth/state'),
+  authSetup: (username: string, password: string) =>
+    http<{ ok: boolean; username: string }>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+      headers: setupToken ? { 'X-Setup-Token': setupToken } : undefined,
+    }),
+  authLogin: (username: string, password: string) =>
+    http<{ ok: boolean; username: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  authLogout: () =>
+    http<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  authChangePassword: (currentPassword: string, newPassword: string) =>
+    http<{ ok: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+  authChangeUsername: (currentPassword: string, username: string) =>
+    http<{ ok: boolean; username: string }>('/api/auth/change-username', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, username }),
+    }),
+  authRevokeAll: (currentPassword: string) =>
+    http<{ ok: boolean }>('/api/auth/revoke-all', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword }),
+    }),
+  health: () => http<HealthReport>('/api/health'),
+  appleStatus: () => http<AppleStatus>('/api/settings/apple-status'),
+  resetApplePace: () => http<AppleStatus>('/api/settings/apple-status/reset', { method: 'POST' }),
+  settings: () => http<PublicSettings>('/api/settings'),
+  saveSettings: (patch: Partial<PublicSettings> & Partial<AppleGatewaySettingsPatch>) =>
+    http<PublicSettings>('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  storefronts: (lang: string) =>
+    http<{ storefronts: Array<{ id: string; name: string }> }>(
+      `/api/settings/storefronts?lang=${encodeURIComponent(lang)}`,
+    ),
+  octoIntegrationToken: () =>
+    http<{ token: string | null }>('/api/settings/octo-integration/token'),
+  regenerateOctoIntegrationToken: () =>
+    http<{ token: string }>('/api/settings/octo-integration/token', { method: 'POST' }),
+  saveAppleCreds: (email: string, password: string, autoLogin = true) =>
+    http<{
+      ok: boolean
+      loginStarted?: boolean
+      loginError?: string
+    }>('/api/settings/apple-credentials', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, autoLogin }),
+    }),
+  runAppleLogin: () =>
+    http<{ ok: boolean; loginStarted?: boolean }>(
+      '/api/settings/apple-credentials/login',
+      { method: 'POST' },
+    ),
+  appleLoginStatus: () =>
+    http<WrapperLoginStatus>('/api/settings/apple-credentials/login-status'),
+  submitAppleTwoFa: (code: string) =>
+    http<{ ok: boolean }>('/api/settings/apple-credentials/2fa', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  cancelAppleLogin: () =>
+    http<{ ok: boolean }>(
+      '/api/settings/apple-credentials/cancel-login',
+      { method: 'POST' },
+    ),
+  clearAppleCreds: () =>
+    http<{ ok: boolean }>('/api/settings/apple-credentials', {
+      method: 'DELETE',
+    }),
+  saveMediaUserToken: (token: string) =>
+    http<{ ok: boolean }>('/api/settings/media-user-token', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+  clearMediaUserToken: () =>
+    http<{ ok: boolean }>('/api/settings/media-user-token', {
+      method: 'DELETE',
+    }),
+  search: (q: string, options: SearchOptions = {}) => {
+    const params = new URLSearchParams({ q })
+    if (options.types) params.set('types', options.types)
+    if (typeof options.limit === 'number') params.set('limit', String(options.limit))
+    if (typeof options.offset === 'number') params.set('offset', String(options.offset))
+    return http<{
+      albums: Album[]
+      artists: Artist[]
+      songs: Song[]
+      playlists: Playlist[]
+      storefront: string
+      redirect?: string
+    }>(`/api/search?${params.toString()}`)
+  },
+  album: (id: string) =>
+    http<{ album: AlbumDetail; storefront: string }>(
+      `/api/album/${encodeURIComponent(id)}`,
+    ),
+  artist: (id: string) =>
+    http<{
+      artist: Artist
+      albums: Album[]
+      storefront: string
+    }>(`/api/artist/${encodeURIComponent(id)}`),
+  curator: (id: string, storefront?: string | null) =>
+    http<{ curator: BrowseHeader; playlists: Playlist[]; storefront: string }>(
+      `/api/curator/${encodeURIComponent(id)}${storefront ? `?storefront=${encodeURIComponent(storefront)}` : ''}`,
+    ),
+  label: (id: string, storefront?: string | null) =>
+    http<{
+      label: BrowseHeader
+      latestReleases: Album[]
+      topReleases: Album[]
+      albums: Album[]
+      storefront: string
+    }>(`/api/label/${encodeURIComponent(id)}${storefront ? `?storefront=${encodeURIComponent(storefront)}` : ''}`),
+  playlist: (id: string) =>
+    http<{ playlist: PlaylistDetail; storefront: string }>(
+      `/api/playlist/${encodeURIComponent(id)}`,
+    ),
+  libraryPlaylist: (libraryId: string) =>
+    http<{ playlist: LibraryPlaylistDetail; storefront: string }>(
+      `/api/playlist/library/${encodeURIComponent(libraryId)}`,
+    ),
+  following: () => http<{ artists: FollowedArtist[] }>('/api/following'),
+  followedArtist: (id: string) =>
+    http<{ artist: FollowedArtist | null }>(
+      `/api/following/${encodeURIComponent(id)}`,
+    ),
+  followArtist: (
+    id: string,
+    downloadNow: boolean,
+    quality?: QualityPreference,
+    releaseScope?: ReleaseScope,
+  ) =>
+    http<{
+      artist: FollowedArtist | null
+      queued: Job[]
+      failed?: Array<{ albumId: string; albumTitle?: string; error: string }>
+    }>(
+      `/api/following/${encodeURIComponent(id)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ downloadNow, quality, releaseScope }),
+      },
+    ),
+  updateFollowedArtist: (id: string, patch: { releaseScope?: ReleaseScope }) =>
+    http<{ artist: FollowedArtist | null }>(
+      `/api/following/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      },
+    ),
+  unfollowArtist: (id: string) =>
+    http<{ ok: boolean; existed: boolean }>(
+      `/api/following/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+  runFollowingCheck: () =>
+    http<{ ok: boolean; artists?: number; queued?: number; discovered?: number }>(
+      '/api/following/check/run',
+      { method: 'POST' },
+    ),
+  downloadMissingReleases: (quality?: QualityPreference) =>
+    http<{ ok: boolean; queued: number }>('/api/following/download-missing', {
+      method: 'POST',
+      body: JSON.stringify({ quality }),
+    }),
+  downloadArtistMissingReleases: (id: string, quality?: QualityPreference) =>
+    http<{ ok: boolean; queued: number }>(`/api/following/${encodeURIComponent(id)}/download-missing`, {
+      method: 'POST',
+      body: JSON.stringify({ quality }),
+    }),
+  playlistFollowing: () =>
+    http<{ playlists: FollowedPlaylist[] }>('/api/playlist-following'),
+  followedPlaylist: (id: string) =>
+    http<{ playlist: FollowedPlaylist | null }>(
+      `/api/playlist-following/${encodeURIComponent(id)}`,
+    ),
+  followLibraryPlaylist: (
+    libraryId: string,
+    downloadNow: boolean,
+    quality?: QualityPreference,
+  ) =>
+    http<PlaylistFollowResult>(
+      `/api/playlist-following/library/${encodeURIComponent(libraryId)}`,
+      { method: 'POST', body: JSON.stringify({ downloadNow, quality }) },
+    ),
+  followCatalogPlaylist: (
+    catalogId: string,
+    downloadNow: boolean,
+    quality?: QualityPreference,
+  ) =>
+    http<PlaylistFollowResult>(
+      `/api/playlist-following/catalog/${encodeURIComponent(catalogId)}`,
+      { method: 'POST', body: JSON.stringify({ downloadNow, quality }) },
+    ),
+  unfollowPlaylist: (id: string) =>
+    http<{ ok: boolean; existed: boolean }>(
+      `/api/playlist-following/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+  runPlaylistSync: () =>
+    http<{ ok: boolean; playlists?: number; queued?: number; discovered?: number }>(
+      '/api/playlist-following/sync/run',
+      { method: 'POST' },
+    ),
+  syncFollowedPlaylistNow: (id: string) =>
+    http<{ ok: boolean; playlist: FollowedPlaylist | null; queued: number; discovered: number }>(
+      `/api/playlist-following/${encodeURIComponent(id)}/sync`,
+      { method: 'POST' },
+    ),
+  downloadPlaylistMissing: (id: string, quality?: QualityPreference) =>
+    http<{ ok: boolean; playlist: FollowedPlaylist | null; queued: number }>(
+      `/api/playlist-following/${encodeURIComponent(id)}/download-missing`,
+      { method: 'POST', body: JSON.stringify({ quality }) },
+    ),
+  importFiles: () =>
+    http<{ files: ImportedFile[] }>('/api/imports'),
+  importFilesAdd: (
+    files: Array<{ name: string; content: string }>,
+    quality?: QualityPreference | null,
+  ) =>
+    http<{ files: ImportedFile[] }>('/api/imports', {
+      method: 'POST',
+      body: JSON.stringify({ files, quality }),
+    }),
+  importFilesRun: (id: string) =>
+    http<{ file: ImportedFile }>(
+      `/api/imports/${encodeURIComponent(id)}/run`,
+      { method: 'POST' },
+    ),
+  importFilesRemove: (id: string) =>
+    http<{ ok: boolean }>(`/api/imports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  queue: () => http<{ jobs: Job[]; paused: boolean }>('/api/queue'),
+  reorderQueue: (ids: string[]) =>
+    http<{ order: string[] }>('/api/queue/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+  pauseQueue: () => http<{ paused: boolean }>('/api/queue/pause', { method: 'POST' }),
+  resumeQueue: () => http<{ paused: boolean }>('/api/queue/resume', { method: 'POST' }),
+  library: () =>
+    http<{
+      albums: LibraryAlbum[]
+      singles: LibrarySingle[]
+      playlists: LibraryPlaylist[]
+      albumKeys?: string[]
+      songKeys?: string[]
+      playlistIds?: string[]
+      isrcs?: string[]
+      upcs?: string[]
+      albumVariants?: Record<string, QualityGroup[]>
+      albumVersionGroups?: Record<string, QualityGroup[]>
+      totals: { albums: number; singles: number; playlists?: number }
+    }>('/api/library'),
+  libraryPresence: (payload: {
+    albums?: Array<{ id: string; artistName: string; albumName: string; upc?: string | null }>
+    songs?: Array<{ id: string; artistName: string; songName: string; isrc?: string | null }>
+    playlists?: Array<{ id: string }>
+    albumTracks?: Array<{
+      id: string
+      artistName: string
+      albumName: string
+      tracks: Array<{ id: string; name: string; isrc?: string | null }>
+    }>
+  }) =>
+    http<{
+      albums: Record<string, boolean>
+      songs: Record<string, boolean>
+      playlists: Record<string, boolean>
+      albumTracks: Record<
+        string,
+        {
+          present: number
+          expected: number
+          complete: boolean
+          folderExists: boolean
+          tracks: Record<string, boolean>
+        }
+      >
+    }>('/api/library/presence', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteLibrarySong: (relPath: string) =>
+    http<{ ok: boolean; removedLyrics?: boolean }>('/api/library/song', {
+      method: 'DELETE',
+      body: JSON.stringify({ relPath }),
+    }),
+  deleteLibraryAlbum: (relPath: string) =>
+    http<{ ok: boolean }>('/api/library/album', {
+      method: 'DELETE',
+      body: JSON.stringify({ relPath }),
+    }),
+  deleteLibraryPlaylist: (relPath: string) =>
+    http<{ ok: boolean }>('/api/library/playlist', {
+      method: 'DELETE',
+      body: JSON.stringify({ relPath }),
+    }),
+  enqueue: (albumId: string, quality?: QualityPreference) =>
+    http<{ job: Job }>('/api/download', {
+      method: 'POST',
+      body: JSON.stringify({ albumId, quality }),
+    }),
+  enqueueBulk: (albumIds: string[], quality?: QualityPreference) =>
+    http<BulkDownloadResult>('/api/download/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ albumIds, quality }),
+    }),
+  enqueueSong: (songId: string, albumId?: string | null, storefront?: string, quality?: QualityPreference) =>
+    http<{ job: Job }>('/api/download/song', {
+      method: 'POST',
+      body: JSON.stringify({ songId, albumId: albumId || null, storefront, quality }),
+    }),
+  enqueuePlaylist: (playlistId: string, storefront?: string, quality?: QualityPreference) =>
+    http<{ job: Job }>('/api/download/playlist', {
+      method: 'POST',
+      body: JSON.stringify({ playlistId, storefront, quality }),
+    }),
+  enqueueLibraryPlaylist: (libraryId: string, storefront?: string, quality?: QualityPreference) =>
+    http<{ job: Job }>('/api/download/playlist', {
+      method: 'POST',
+      body: JSON.stringify({ libraryId, storefront, quality }),
+    }),
+  cancel: (id: string) =>
+    http<{ ok: boolean }>(`/api/download/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  cancelAll: () =>
+    http<{ ok: boolean; cancelled: number }>('/api/download/cancel-all', {
+      method: 'POST',
+    }),
+  cloudLibraryHealth: () =>
+    http<CloudLibraryHealth>('/api/cloud-library/health'),
+  cloudLibraryAlbums: (offset = 0, limit = 100) =>
+    http<CloudLibraryPage<CloudLibraryAlbum>>(
+      `/api/cloud-library/albums?offset=${offset}&limit=${limit}`,
+    ),
+  cloudLibraryPlaylists: (offset = 0, limit = 100) =>
+    http<CloudLibraryPage<CloudLibraryPlaylist>>(
+      `/api/cloud-library/playlists?offset=${offset}&limit=${limit}`,
+    ),
+  cloudLibrarySongs: (offset = 0, limit = 100) =>
+    http<CloudLibraryPage<CloudLibrarySong>>(
+      `/api/cloud-library/songs?offset=${offset}&limit=${limit}`,
+    ),
+  cloudLibraryDownloadAll: (kind: CloudLibraryKind, quality?: QualityPreference) =>
+    http<CloudDownloadAllResult>('/api/cloud-library/download-all', {
+      method: 'POST',
+      body: JSON.stringify({ kind, quality }),
+    }),
+  tagBackfillStatus: () => http<TagBackfillStatus>('/api/settings/tag-backfill'),
+  startTagBackfill: (dryRun = false) =>
+    http<TagBackfillStatus>('/api/settings/tag-backfill', {
+      method: 'POST',
+      body: JSON.stringify({ dryRun }),
+    }),
+  stopTagBackfill: () =>
+    http<{ ok: boolean }>('/api/settings/tag-backfill/stop', { method: 'POST' }),
+  clipsSearch: (q: string) =>
+    http<{ clips: Clip[]; artists: ClipArtist[] }>(`/api/clips/search?q=${encodeURIComponent(q)}`),
+  clipsArtist: (id: string) =>
+    http<{ artistName: string | null; clips: Clip[] }>(`/api/clips/artist/${encodeURIComponent(id)}`),
+  clipsJobs: () => http<{ jobs: ClipJob[] }>('/api/clips/jobs'),
+  clipsDownload: (id: string) =>
+    http<ClipJob>('/api/clips/download', { method: 'POST', body: JSON.stringify({ id }) }),
+  clipsCancel: (jobId: string) =>
+    http<{ ok: boolean }>(`/api/clips/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+  clipsClear: () => http<{ ok: boolean }>('/api/clips/jobs/clear', { method: 'POST' }),
+  animatedBackfillStatus: () => http<AnimatedBackfillStatus>('/api/settings/animated-backfill'),
+  startAnimatedBackfill: () =>
+    http<AnimatedBackfillStatus>('/api/settings/animated-backfill', { method: 'POST' }),
+  stopAnimatedBackfill: () =>
+    http<{ ok: boolean }>('/api/settings/animated-backfill/stop', { method: 'POST' }),
+  lyricsBackfillStatus: () => http<LyricsBackfillStatus>('/api/settings/lyrics-backfill'),
+  startLyricsBackfill: () =>
+    http<LyricsBackfillStatus>('/api/settings/lyrics-backfill', { method: 'POST' }),
+  stopLyricsBackfill: () =>
+    http<{ ok: boolean }>('/api/settings/lyrics-backfill/stop', { method: 'POST' }),
+  artistBackfillStatus: () => http<ArtistBackfillStatus>('/api/settings/artist-backfill'),
+  startArtistBackfill: () =>
+    http<ArtistBackfillStatus>('/api/settings/artist-backfill', { method: 'POST' }),
+  stopArtistBackfill: () =>
+    http<{ ok: boolean }>('/api/settings/artist-backfill/stop', { method: 'POST' }),
+}
+
+export function artworkUrl(
+  template: string | null | undefined,
+  size = 600,
+): string | null {
+  if (!template) return null
+  return template
+    .replace('{w}', String(size))
+    .replace('{h}', String(size))
+    .replace('{f}', 'jpg')
+}
+
+export function artworkSrcSet(template: string | null | undefined): string {
+  if (!template) return ''
+  const base = template.replace('{f}', 'jpg')
+  return [300, 600, 1200]
+    .map((s) =>
+      `${base.replace('{w}', String(s)).replace('{h}', String(s))} ${s}w`,
+    )
+    .join(', ')
+}

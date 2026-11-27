@@ -1,0 +1,21 @@
+.git
+.gitignore
+.env
+.env.example
+README.md
+LICENSE
+docker-compose.yml
+docker-compose.override.yml
+
+# Node/Vite artifacts (rebuilt inside the image)
+**/node_modules
+**/dist
+backend/public
+frontend/dist
+
+# Local data + IDE noise
+data
+config
+assets
+*.log
+.DS_Store

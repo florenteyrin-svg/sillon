@@ -7,9 +7,13 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
 - **Ajout instantané** : un morceau qui arrive dans le dossier (par exemple téléchargé par à la carte)
   est dans la bibliothèque en ~2 secondes, sans scan à attendre.
 - **Logo de qualité** pour chaque titre et album : `hires` (plus de 16 bit ou plus de 48 kHz),
-  `cd` (16 bit / 44,1 kHz, 1411 kbps) ou `lossy` (MP3, AAC…).
+  `cd` (16 bit / 44,1 kHz, 1411 kbps), `atmos` (Dolby Atmos) ou `lossy` (MP3, AAC…).
+- **Respecte les fichiers `.ignore`** comme Jellyfin : un dossier qui en contient un (Mes Découvertes,
+  dossiers `cover` des pochettes animées) est ignoré.
 - **Compatible Subsonic / OpenSubsonic** : Music Assistant (donc Home Assistant), Symfonium, etc.
 - **Recherche et téléchargement Apple Music** via à la carte, sans exposer à la carte sur Internet.
+  Ta version personnalisée d'à la carte est dans [`alacarte/`](alacarte/MES_MODIFS.md) (rangement Mes FLAC /
+  Mes MP3 / Mes Dolby Atmos / Mes Playlists, Mes Découvertes, pochettes animées, clips).
 - **Playlists intelligentes** calculées en quelques millisecondes.
 - **Reprise de lecture** sur n'importe quel appareil (file d'attente et position gardées par le serveur).
 - Léger : ~30 Mo de RAM pour 22 000 titres.
@@ -25,17 +29,20 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
    cd sillon && cp .env.example .env && nano .env
    ```
    - `MUSIC_PATH` : ton dossier de musiques.
-   - `SILLON_DATA_PATH` / `ALACARTE_DATA_PATH` : où garder les bases et réglages.
+   - `ALACARTE_DATA_PATH` : le dossier de données de ton à la carte actuel (garde la connexion Apple
+     et les réglages).
    - `SILLON_ADMIN_PASSWORD` : le mot de passe de ton compte Sillon.
-3. Lance :
+   - `ALACARTE_USER` / `ALACARTE_PASSWORD` : ton compte à la carte.
+3. Si à la carte tourne déjà dans une autre pile Docker, arrête-la (mêmes noms et même port) :
+   ```bash
+   cd /chemin/de/ton/ancien/alacarte && docker compose down
+   ```
+4. Lance :
    ```bash
    docker compose up -d
    ```
-   L'image de Sillon est téléchargée toute prête. À la carte est construit depuis son dépôt
-   (quelques minutes la première fois).
-4. Configure à la carte une seule fois sur `http://IP-DU-SERVEUR:7373` (compte, identifiants Apple),
-   puis mets ce compte dans `ALACARTE_USER` / `ALACARTE_PASSWORD` du `.env` et relance
-   `docker compose up -d`.
+   L'image de Sillon est téléchargée toute prête. À la carte est construit depuis le dossier
+   `alacarte/` (quelques minutes la première fois).
 
 Mettre à jour :
 

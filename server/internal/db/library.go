@@ -32,6 +32,7 @@ type Track struct {
 	Bitrate       int
 	Channels      int
 	Quality       string
+	Atmos         bool // set by the scanner; not stored apart (quality = atmos)
 	HasLyrics     bool
 	CreatedAt     int64
 }
@@ -41,6 +42,7 @@ const (
 	QualityHiRes = "hires" // lossless, more than 16 bit or more than 48 kHz
 	QualityCD    = "cd"    // lossless, 16 bit / 44.1 or 48 kHz
 	QualityLossy = "lossy" // MP3, AAC, Opus...
+	QualityAtmos = "atmos" // Dolby Atmos (E-AC-3 JOC, TrueHD)
 )
 
 func QualityOf(lossless bool, bitDepth, sampleRate int) string {
@@ -62,9 +64,15 @@ func (t *Track) FillIDs() {
 	}
 	t.ArtistID = ID("ar-", t.Artist)
 	t.AlbumArtistID = ID("ar-", t.AlbumArtist)
-	// Same album name by the same album artist = one album, wherever its files are
-	t.AlbumID = ID("al-", t.AlbumArtist, t.Album)
+	// Same album name by the same album artist = one album, wherever its files are.
+	// The Dolby Atmos version of an album stays a separate album.
 	t.Quality = QualityOf(t.Lossless, t.BitDepth, t.SampleRate)
+	if t.Atmos {
+		t.Quality = QualityAtmos
+		t.AlbumID = ID("al-", t.AlbumArtist, t.Album, "atmos")
+	} else {
+		t.AlbumID = ID("al-", t.AlbumArtist, t.Album)
+	}
 }
 
 // Known returns path -> (mtime, size) of every indexed file, to skip unchanged files when scanning.
@@ -169,7 +177,7 @@ func (d *DB) RefreshAggregates() error {
 		        COUNT(*), SUM(t.duration),
 		        (SELECT id FROM tracks c WHERE c.album_id = t.album_id ORDER BY c.disc_no, c.track_no LIMIT 1),
 		        '',
-		        CASE WHEN SUM(t.quality = 'hires') > 0 THEN 'hires' WHEN SUM(t.quality = 'cd') > 0 THEN 'cd' ELSE 'lossy' END,
+		        CASE WHEN SUM(t.quality = 'atmos') > 0 THEN 'atmos' WHEN SUM(t.quality = 'hires') > 0 THEN 'hires' WHEN SUM(t.quality = 'cd') > 0 THEN 'cd' ELSE 'lossy' END,
 		        COALESCE((SELECT created_at FROM temp.album_created a WHERE a.id = t.album_id), MIN(t.created_at))
 		 FROM tracks t GROUP BY t.album_id`,
 		`DELETE FROM artists`,

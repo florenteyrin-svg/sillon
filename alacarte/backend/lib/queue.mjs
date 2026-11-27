@@ -1,0 +1,2978 @@
+import { queueAnimatedArtworkForJob } from './animatedArtwork.mjs'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import fsp from 'node:fs/promises'
+
+import { emitEvent } from './eventBus.mjs'
+import { runInLane } from './appleGateway.mjs'
+import { readSettings, readAppleCreds } from './settingsStore.mjs'
+import {
+  artworkUrl,
+  getAlbum,
+  getPlaylist,
+  getSong,
+  iterateCatalogPlaylistTracks,
+  normalizeAlbum,
+  normalizePlaylist,
+  formatReleaseDate,
+  isReleasedTrack,
+} from './appleApi.mjs'
+import { getLibraryPlaylistDetail } from './appleLibraryApi.mjs'
+import { triggerNavidromeScan } from './navidromeApi.mjs'
+import { creditImportedFiles } from './artistCredits.mjs'
+import { probeMp4Box, writeAmdpConfig, spawnAmdp, stripAnsi } from './amdpRunner.mjs'
+import { applyVariantSuffix, groupOf } from './qualityGroups.mjs'
+import {
+  convertDirToFlac,
+  extractFolderArt,
+} from './flacConvert.mjs'
+import { syncDualLyricsInDir } from './ttmlLrc.mjs'
+import {
+  applyNamingConvention,
+  assertFreeSpace,
+  assertWritableTarget,
+  estimateJobBytes,
+  PLAYLISTS_FOLDER,
+  computeFinalDir,
+  detectNameByteLimit,
+  libraryRootFor,
+  ensureDir,
+  fitFileName,
+  mergeMove,
+  sanitizeSegment,
+  writeVersionMarker,
+} from './folderLayout.mjs'
+import { cleanOldDiscoveries, ensureDiscoveryFolder, findSongPathInLibrary, getAlbumTrackPresence, pruneDiscoveryDuplicates, getAlbumVersionGroups, hasSongInLibrary, invalidateLibraryCache, isPlaylistInLibrary, songNameFromFilename, stripTrailingYear } from './libraryIndex.mjs'
+import { writePlaylistM3U } from './playlistExport.mjs'
+import { getDb, getMeta, setMeta } from './db.mjs'
+import { amdpNameCharLimit, normalizeForMatchKey, restoreTruncatedName } from './libraryMatchKey.mjs'
+import { readAudioMetaTags, writeAudioIdentityTags, writeFlacComments } from './audioTags.mjs'
+import { probeWrapperPorts } from './wrapperHealth.mjs'
+import { resolveMetadataName } from './metadataLanguage.mjs'
+import { getOriginalAlbumMeta, getOriginalPlaylistMeta } from './originalMetadataCache.mjs'
+import { wakeWrapper } from './wrapperLogin.mjs'
+
+const MUSIC_ROOT = process.env.AMDL_MUSIC_PATH || '/music'
+const STAGING_ROOT_OUTSIDE = '/tmp/alacarte-staging'
+const STAGING_ROOT_INSIDE = path.join(MUSIC_ROOT, '.amdl-tmp')
+const STAGING_MAX_AGE_HOURS = 24
+const STAGING_MAX_AGE_MS = STAGING_MAX_AGE_HOURS * 60 * 60 * 1000
+const JOB_DIR_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const CONFIG_DIR = process.env.AMDL_CONFIG_DIR || '/config'
+const HISTORY_FILE = path.join(CONFIG_DIR, 'history.ndjson')
+const MAX_CONCURRENT = 1
+const QUALITY_VALUES = new Set(['flac', 'alac', 'atmos', 'aac'])
+// Playlists reuse tracks already in the library, so their full length
+// overstates what gets downloaded.
+const PLAYLIST_SPACE_TRACK_CAP = 30
+const STALL_WARN_MS = Math.max(5_000, Number(process.env.AMDL_STALL_WARN_MS) || 60_000)
+const STALL_TIMEOUT_MS = Math.max(
+  STALL_WARN_MS + 5_000,
+  Number(process.env.AMDL_STALL_TIMEOUT_MS) || 120_000,
+)
+const STALL_TICK_MS = 5_000
+const FIRST_LINE_TIMEOUT_MS = Math.max(
+  5_000,
+  Number(process.env.AMDL_FIRST_LINE_TIMEOUT_MS) || 30_000,
+)
+const MAX_DOWNLOAD_ERRORS = Math.max(
+  1,
+  Number(process.env.AMDL_MAX_DOWNLOAD_ERRORS) || 3,
+)
+const FATAL_DOWNLOAD_PATTERNS = [
+  /invalid CKC/i,
+  /CKC.*error/i,
+  /failed to get CKC/i,
+  /decryption failed/i,
+  /decrypt.*error/i,
+  /license.*error/i,
+  /DRM.*error/i,
+]
+
+const state = {
+  jobs: new Map(), // id -> job
+  queue: [], // job ids
+  active: new Set(),
+  running: new Map(), // id -> abortController
+  paused: false,
+}
+
+const QUEUE_PAUSED_KEY = 'queue_paused'
+
+// Queued jobs run in queueSeq order (creation time until reordered), which
+// is also the seq persisted for restarts.
+function queueSeq(job) {
+  return job?.queueSeq ?? job?.createdAt ?? 0
+}
+
+export function getQueueState() {
+  return { paused: state.paused }
+}
+
+// Pausing only stops new jobs from starting; the running one finishes.
+export function setQueuePaused(paused) {
+  state.paused = Boolean(paused)
+  try {
+    setMeta(QUEUE_PAUSED_KEY, state.paused ? '1' : '0')
+  } catch (err) {
+    console.error('queue pause persist failed:', err.message)
+  }
+  emitEvent('queue.state', getQueueState())
+  if (!state.paused) setImmediate(tickQueue)
+  return getQueueState()
+}
+
+// Puts the listed queued jobs first, in the given order; queued jobs that
+// were not listed keep their relative order after them. The existing seq
+// values are reused so new jobs still land at the end.
+export function reorderQueue(ids) {
+  const queued = new Set(state.queue)
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => queued.has(id)))]
+  const listed = new Set(wanted)
+  const next = [...wanted, ...state.queue.filter((id) => !listed.has(id))]
+  const seqs = next.map((id) => queueSeq(state.jobs.get(id))).sort((a, b) => a - b)
+  for (let i = 1; i < seqs.length; i++) {
+    if (seqs[i] <= seqs[i - 1]) seqs[i] = seqs[i - 1] + 1
+  }
+  state.queue = next
+  next.forEach((id, i) => {
+    const j = state.jobs.get(id)
+    if (j && queueSeq(j) !== seqs[i]) {
+      updateJob(id, { queueSeq: seqs[i] })
+      persistJob(j, true)
+    }
+  })
+  return next
+}
+
+function createProgressState(job, { convertEnabled }) {
+  const knownTotal = Number(job?.stats?.total || 0)
+  const fallbackTotal = job?.kind === 'song' ? 1 : 10
+  const downloadTotal = knownTotal > 0 ? knownTotal : fallbackTotal
+  return {
+    downloadTotal,
+    downloadDone: 0,
+    downloadPartial: 0,
+    convertEnabled: Boolean(convertEnabled),
+    convertTotal: Boolean(convertEnabled) ? downloadTotal : 0,
+    convertDone: 0,
+    finalizeProgress: 0,
+  }
+}
+
+// Downloads die at finalize when the final folder cannot be written (e.g.
+// legacy root-owned artist folders from a rootful -> rootless migration).
+// Check the target before the amdl run so the job fails in seconds with an
+// actionable message instead of after the whole album is in staging.
+async function preflightMusicTarget(settings, job) {
+  if (job.kind === 'playlist' || !job.artist) {
+    await assertWritableTarget(MUSIC_ROOT)
+    return
+  }
+  const convention = settings.namingConvention || 'apple'
+  let finalDir = await computeFinalDir(
+    libraryRootFor(MUSIC_ROOT, job),
+    job.artist,
+    applyNamingConvention(stripTrailingYear(job.albumTitle || ''), convention),
+    job.year,
+  )
+  if (job.variant) {
+    finalDir = applyVariantSuffix(finalDir, job.variant, job.quality)
+  }
+  await assertWritableTarget(finalDir)
+}
+
+function resolveStagingRoot(settings) {
+  if (settings?.stagingInsideMusicLibrary) {
+    return STAGING_ROOT_INSIDE
+  }
+  return STAGING_ROOT_OUTSIDE
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
+}
+
+function computeProgressPercent(state) {
+  const downloadDoneUnits = Math.min(
+    state.downloadTotal,
+    Math.max(0, state.downloadDone) +
+      (state.downloadDone < state.downloadTotal
+        ? clamp01(state.downloadPartial)
+        : 0),
+  )
+  const convertDoneUnits = state.convertEnabled
+    ? Math.min(state.convertTotal, Math.max(0, state.convertDone))
+    : 0
+  const finalizeDoneUnits = clamp01(state.finalizeProgress)
+  const totalUnits = Math.max(
+    1,
+    state.downloadTotal + (state.convertEnabled ? state.convertTotal : 0) + 1,
+  )
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(
+        ((downloadDoneUnits + convertDoneUnits + finalizeDoneUnits) / totalUnits) *
+          100,
+      ),
+    ),
+  )
+}
+
+function applyProgress(job, progressState, patch = {}) {
+  updateJob(job.id, {
+    ...patch,
+    progress: computeProgressPercent(progressState),
+  })
+}
+
+function normalizeQuality(value, fallback = 'flac') {
+  return QUALITY_VALUES.has(value) ? value : fallback
+}
+
+function setConversionEnabled(progressState, enabled) {
+  progressState.convertEnabled = Boolean(enabled)
+  progressState.convertTotal = enabled ? Math.max(1, progressState.downloadTotal) : 0
+  progressState.convertDone = 0
+}
+
+/**
+ * Resolve album / artist / per-track naming for the user's naming-language
+ * preference (settings.namingLanguageMode + settings.acceptedLanguages).
+ *
+ * Mode 'display' (the default) is exactly today's behavior and returns
+ * immediately with zero extra Apple API calls. The other two modes need a
+ * second, home-locale copy of the album to learn the "original" name — that
+ * lookup is paced and cached (see originalMetadataCache.mjs) so it never
+ * multiplies per-track API traffic.
+ */
+async function resolveAlbumNaming({ settings, storefront, albumId, meta }) {
+  const mode = settings?.namingLanguageMode || 'display'
+  const fallback = {
+    albumTitle: meta?.name ? stripTrailingYear(meta.name) : null,
+    artist: meta?.artistName || null,
+    originalAlbumTitle: null,
+    originalArtist: null,
+    trackNameOverrides: [],
+  }
+  if (mode === 'display' || !meta) return fallback
+
+  const original = await getOriginalAlbumMeta({ storefront, albumId })
+  if (!original) return fallback
+
+  const acceptedLanguages = Array.isArray(settings?.acceptedLanguages)
+    ? settings.acceptedLanguages
+    : []
+  const displayAlbumTitle = stripTrailingYear(meta.name)
+  const originalAlbumTitleRaw = stripTrailingYear(original.name)
+
+  const albumTitle = resolveMetadataName({
+    mode,
+    displayName: displayAlbumTitle,
+    originalName: originalAlbumTitleRaw,
+    acceptedLanguages,
+  })
+  const artist = resolveMetadataName({
+    mode,
+    displayName: meta.artistName,
+    originalName: original.artistName,
+    acceptedLanguages,
+  })
+
+  const originalById = new Map((original.tracks || []).map((t) => [t.id, t]))
+  const trackNameOverrides = (meta.tracks || []).map((t) => {
+    const originalTrack = originalById.get(t.id)
+    const resolvedName = resolveMetadataName({
+      mode,
+      displayName: t.name,
+      originalName: originalTrack?.name,
+      acceptedLanguages,
+    })
+    return {
+      id: t.id,
+      name: t.name, // display name — matches the name amdp itself writes
+      trackNumber: t.trackNumber,
+      isrc: t.isrc || null,
+      resolvedName,
+      originalName: originalTrack?.name || null,
+    }
+  })
+
+  return {
+    albumTitle: albumTitle || displayAlbumTitle,
+    artist: artist || meta.artistName,
+    originalAlbumTitle:
+      originalAlbumTitleRaw && originalAlbumTitleRaw !== displayAlbumTitle
+        ? originalAlbumTitleRaw
+        : null,
+    originalArtist:
+      original.artistName && original.artistName !== meta.artistName
+        ? original.artistName
+        : null,
+    trackNameOverrides,
+  }
+}
+
+/**
+ * Rename downloaded audio files (and their .lrc/.ttml sidecars) in place so
+ * their filenames reflect the resolved naming-language preference instead of
+ * whatever display-language name amdp itself embedded. Mirrors the qobuz
+ * naming-convention rename block right above each call site. Fail-soft.
+ */
+async function renameTrackFilesForLanguage(albumPath, overrides) {
+  if (!overrides?.length) return
+  let files
+  try {
+    files = await fsp.readdir(albumPath)
+  } catch {
+    return
+  }
+  for (const fn of files) {
+    if (!/\.(flac|m4a|mp3|lrc|ttml)$/i.test(fn)) continue
+    const track = matchTrackForFile(fn, overrides)
+    if (!track?.resolvedName || track.resolvedName === track.name) continue
+    if (!fn.includes(track.name)) continue
+    // resolved names come straight from Apple, so clean them like folder names
+    const newName = fitFileName(fn.split(track.name).join(sanitizeSegment(track.resolvedName)))
+    if (newName === fn) continue
+    try {
+      const dst = path.join(albumPath, newName)
+      if (!(await fsp.stat(dst).catch(() => null))) {
+        await fsp.rename(path.join(albumPath, fn), dst)
+      }
+    } catch (err) {
+      console.error('language rename failed:', err.message)
+    }
+  }
+}
+
+export function listJobs() {
+  const all = [...state.jobs.values()]
+  all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+  return all
+}
+
+export function getJob(id) {
+  return state.jobs.get(id) || null
+}
+
+// amdp's progress bars produce hundreds of updates per second; the UI only
+// needs the latest percentage a few times a second. Anything else (status,
+// message, current track, real log lines) goes out immediately.
+const JOB_UPDATE_MIN_INTERVAL_MS = 250
+const PROGRESS_LOG_MIN_INTERVAL_MS = 500
+const lastJobEmitAt = new Map()
+const pendingJobEmit = new Map()
+const lastProgressLogAt = new Map()
+const pendingProgressLog = new Map()
+
+function emitJobUpdate(j, immediate) {
+  const pending = pendingJobEmit.get(j.id)
+  const wait = lastJobEmitAt.get(j.id) + JOB_UPDATE_MIN_INTERVAL_MS - Date.now()
+  if (immediate || !(wait > 0)) {
+    clearTimeout(pending)
+    pendingJobEmit.delete(j.id)
+    if (j.status === 'done' || j.status === 'failed') {
+      flushProgressLog(j.id)
+      lastJobEmitAt.delete(j.id)
+      lastProgressLogAt.delete(j.id)
+    } else {
+      lastJobEmitAt.set(j.id, Date.now())
+    }
+    emitEvent('job.update', jobPublic(j))
+    return
+  }
+  if (pending) return
+  pendingJobEmit.set(
+    j.id,
+    setTimeout(() => {
+      pendingJobEmit.delete(j.id)
+      lastJobEmitAt.set(j.id, Date.now())
+      emitEvent('job.update', jobPublic(j))
+    }, wait),
+  )
+}
+
+// Emits the newest progress line that throttling held back, so the terminal
+// still shows where each progress bar ended.
+function flushProgressLog(jobId) {
+  const held = pendingProgressLog.get(jobId)
+  if (!held) return
+  pendingProgressLog.delete(jobId)
+  emitEvent('job.log', held)
+}
+
+function updateJob(id, patch) {
+  const j = state.jobs.get(id)
+  if (!j) return
+  const changed = (key) => patch[key] !== undefined && patch[key] !== j[key]
+  const statusChanged = changed('status')
+  const visibleChange = statusChanged || changed('message') || changed('currentTrack') || changed('error')
+  Object.assign(j, patch, { updatedAt: Date.now() })
+  persistJob(j, statusChanged)
+  emitJobUpdate(j, visibleChange)
+  if (statusChanged && (j.status === 'done' || j.status === 'failed')) pruneFinishedJobs()
+}
+
+const PERSIST_MIN_INTERVAL_MS = 1_000
+const PERSIST_JOB_CAP = 300
+const lastPersistAt = new Map()
+
+// Finished jobs stay listed in memory like they stay in the database, up to
+// the same cap; older ones only remain in the download history.
+function pruneFinishedJobs() {
+  const finished = [...state.jobs.values()]
+    .filter((j) => j.status === 'done' || j.status === 'failed')
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+  for (const j of finished.slice(PERSIST_JOB_CAP)) {
+    state.jobs.delete(j.id)
+    lastPersistAt.delete(j.id)
+  }
+}
+
+// Persist a job snapshot to SQLite. Progress-only updates are throttled;
+// status changes (and new jobs) always write. Fail-soft: a DB problem must
+// never break downloads.
+function persistJob(job, force = false) {
+  try {
+    const now = Date.now()
+    const last = lastPersistAt.get(job.id) || 0
+    if (!force && now - last < PERSIST_MIN_INTERVAL_MS) return
+    lastPersistAt.set(job.id, now)
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO queue_jobs (id, seq, status, payload, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         seq = excluded.seq,
+         status = excluded.status,
+         payload = excluded.payload,
+         updated_at = excluded.updated_at`,
+    ).run(job.id, queueSeq(job), job.status, JSON.stringify(job), now)
+    if (force && (job.status === 'done' || job.status === 'failed')) {
+      db.prepare(
+        `DELETE FROM queue_jobs WHERE id IN (
+           SELECT id FROM queue_jobs ORDER BY seq DESC LIMIT -1 OFFSET ?
+         )`,
+      ).run(PERSIST_JOB_CAP)
+    }
+  } catch (err) {
+    console.error('queue persist failed:', err.message)
+  }
+}
+
+function makeAbortError() {
+  const err = new Error('Cancelled')
+  err.name = 'AbortError'
+  return err
+}
+
+function throwIfCancelled(job) {
+  if (job?.cancelled) throw makeAbortError()
+}
+
+// Aborts a running job's work outside amdp (FLAC conversion).
+const jobAborts = new Map()
+// Jobs moving files into the library. Cancelling is refused in that window,
+// so a cancelled job never leaves part of an album behind or turns up as
+// done afterwards.
+const importingJobs = new Set()
+
+function jobSignal(job) {
+  return jobAborts.get(job.id)?.signal
+}
+
+function beginLibraryImport(job) {
+  throwIfCancelled(job)
+  importingJobs.add(job.id)
+}
+
+function endLibraryImport(job) {
+  importingJobs.delete(job.id)
+}
+
+function jobPublic(j) {
+  return {
+    id: j.id,
+    kind: j.kind,
+    status: j.status,
+    progress: j.progress,
+    albumId: j.albumId,
+    songId: j.songId || null,
+    followedPlaylistId: j.followedPlaylistId || null,
+    playlistId: j.playlistId || null,
+    libraryPlaylistId: j.libraryPlaylistId || null,
+    albumTitle: j.albumTitle,
+    artist: j.artist,
+    artistId: j.artistId || null,
+    artworkUrl: j.artworkUrl,
+    currentTrack: j.currentTrack,
+    message: j.message,
+    error: j.error,
+    cancelled: Boolean(j.cancelled),
+    createdAt: j.createdAt,
+    updatedAt: j.updatedAt,
+    finalDir: j.finalDir,
+    stats: j.stats,
+    quality: j.quality,
+    variant: j.variant || null,
+    unavailable: Boolean(j.unavailable),
+    queueSeq: queueSeq(j),
+  }
+}
+
+export function notReleasedError(releaseDate) {
+  const date = formatReleaseDate(releaseDate)
+  const err = new Error(date ? `Not released yet (out ${date})` : 'Not released yet')
+  err.code = 'NOT_RELEASED'
+  err.statusCode = 409
+  err.releaseDate = releaseDate || null
+  return err
+}
+
+function alreadyInLibraryError(message) {
+  const err = new Error(message)
+  err.code = 'ALREADY_IN_LIBRARY'
+  err.statusCode = 409
+  return err
+}
+
+const HISTORY_IMPORT_KEY = 'history_imported'
+const MAX_HISTORY_ROWS = 500
+
+async function appendHistory(j) {
+  try {
+    const db = getDb()
+    db.prepare(
+      `INSERT OR REPLACE INTO download_history (id, finished_at, payload)
+       VALUES (?, ?, ?)`,
+    ).run(j.id, Date.now(), JSON.stringify(jobPublic(j)))
+    db.prepare(
+      `DELETE FROM download_history WHERE id IN (
+         SELECT id FROM download_history ORDER BY finished_at DESC LIMIT -1 OFFSET ?
+       )`,
+    ).run(MAX_HISTORY_ROWS)
+  } catch (err) {
+    console.error('history write failed', err.message)
+  }
+}
+
+// One-time import of the legacy history.ndjson into SQLite; the file is kept
+// around untouched as a backup.
+function importLegacyHistory(db) {
+  const imported = db
+    .prepare('SELECT value FROM meta WHERE key = ?')
+    .get(HISTORY_IMPORT_KEY)
+  if (imported?.value === '1') return
+  try {
+    const raw = fs.readFileSync(HISTORY_FILE, 'utf8')
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO download_history (id, finished_at, payload)
+       VALUES (?, ?, ?)`,
+    )
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const job = JSON.parse(trimmed)
+        if (!job?.id) continue
+        insert.run(job.id, Number(job.updatedAt) || 0, trimmed)
+      } catch {}
+    }
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES (?, '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(HISTORY_IMPORT_KEY)
+  } catch {
+    // No legacy file or unreadable — mark as done either way.
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES (?, '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(HISTORY_IMPORT_KEY)
+  }
+}
+
+export function listHistory(limit = 200) {
+  try {
+    const rows = getDb()
+      .prepare(
+        'SELECT payload FROM download_history ORDER BY finished_at DESC LIMIT ?',
+      )
+      .all(Math.max(1, Math.min(Number(limit) || 200, 500)))
+    const jobs = []
+    for (const row of rows) {
+      try {
+        jobs.push(JSON.parse(row.payload))
+      } catch {}
+    }
+    return jobs
+  } catch (err) {
+    console.error('history read failed:', err.message)
+    return []
+  }
+}
+
+// Restore persisted jobs after a restart: queued/running jobs re-enter the
+// queue in their original order, finished jobs stay visible in the UI.
+function restorePersistedJobs() {
+  let restored = 0
+  try {
+    const db = getDb()
+    const rows = db
+      .prepare('SELECT payload FROM queue_jobs ORDER BY seq ASC')
+      .all()
+    for (const row of rows) {
+      let job
+      try {
+        job = JSON.parse(row.payload)
+      } catch {
+        continue
+      }
+      if (!job?.id || state.jobs.has(job.id)) continue
+      if (job.status === 'queued' || job.status === 'running') {
+        job.status = 'queued'
+        job.progress = 0
+        job.message = 'Requeued after restart'
+        state.jobs.set(job.id, job)
+        state.queue.push(job.id)
+        restored += 1
+      } else {
+        state.jobs.set(job.id, job)
+      }
+      lastPersistAt.set(job.id, 0)
+    }
+    if (restored > 0) {
+      console.log(`[queue] requeued ${restored} job(s) from previous run`)
+    }
+  } catch (err) {
+    console.error('queue restore failed:', err.message)
+  }
+}
+
+// Enqueueing looks things up (catalog, library) before the job exists, so
+// two requests for the same thing arriving together would both pass the
+// "already queued" check. Requests with the same key share one enqueue.
+const pendingEnqueues = new Map()
+
+function coalesceEnqueue(key, create) {
+  const pending = pendingEnqueues.get(key)
+  if (pending) return pending
+  const run = create().finally(() => pendingEnqueues.delete(key))
+  pendingEnqueues.set(key, run)
+  return run
+}
+
+export async function enqueueAlbum(opts) {
+  const settings = await readSettings()
+  const group = groupOf(normalizeQuality(opts?.quality, settings.quality))
+  return coalesceEnqueue(`album:${opts?.albumId}:${group}`, () => createAlbumJob(opts))
+}
+
+async function createAlbumJob({ albumId, storefront, quality, expectedArtistId }) {
+  const settings = await readSettings()
+  const requestedQuality = normalizeQuality(quality, settings.quality)
+  const requestedGroup = groupOf(requestedQuality)
+
+  let activeDifferentGroupJob = false
+  for (const j of state.jobs.values()) {
+    if (
+      j.kind === 'album' &&
+      j.albumId === albumId &&
+      (j.status === 'queued' || j.status === 'running')
+    ) {
+      if (groupOf(j.quality) === requestedGroup) return jobPublic(j)
+      activeDifferentGroupJob = true
+    }
+  }
+
+  const id = crypto.randomUUID()
+  let meta = null
+  try {
+    const raw = await getAlbum({
+      storefront: storefront || settings.storefront,
+      id: albumId,
+      language: settings.language,
+    })
+    meta = normalizeAlbum(raw?.data?.[0])
+  } catch (err) {
+    console.error('album metadata lookup failed', err.message)
+  }
+
+  const naming = await resolveAlbumNaming({
+    settings,
+    storefront: storefront || settings.storefront,
+    albumId,
+    meta,
+  })
+
+  let missingTracks = null
+  let variant = null
+  if (meta?.artistName && meta?.name && Array.isArray(meta?.tracks) && meta.tracks.length > 0) {
+    const presence = await getAlbumTrackPresence(
+      meta.artistName,
+      meta.name,
+      meta.tracks.map((t) => ({ id: t.id, name: t.name, isrc: t.isrc })),
+    )
+    const existingGroups = await getAlbumVersionGroups(
+      meta.artistName,
+      meta.name,
+      meta.upc,
+    )
+    if (existingGroups.has(requestedGroup)) {
+      if (presence.complete) {
+        throw alreadyInLibraryError('Already in library')
+      }
+      if (presence.present > 0) {
+        missingTracks = meta.tracks
+          .filter((t) => !presence.tracks[t.id])
+          .map((t) => ({ id: t.id, name: t.name, isrc: t.isrc }))
+      }
+    } else if (
+      (existingGroups.size > 0 || activeDifferentGroupJob) &&
+      (presence.complete || presence.present > 0)
+    ) {
+      variant = requestedGroup
+    }
+  }
+
+  // Only the tracks already out can be downloaded from a pre-release album.
+  const allTracks = meta?.tracks || []
+  if (!variant && allTracks.some((t) => !t.released)) {
+    const wantedIds = new Set((missingTracks || allTracks).map((t) => t.id))
+    const wanted = allTracks.filter((t) => t.released && wantedIds.has(t.id))
+    if (wanted.length === 0) throw notReleasedError(meta?.releaseDate)
+    missingTracks = wanted.map((t) => ({ id: t.id, name: t.name, isrc: t.isrc }))
+  }
+
+  const job = {
+    id,
+    kind: 'album',
+    status: 'queued',
+    progress: 0,
+    albumId,
+    albumTitle: naming.albumTitle || 'Unknown album',
+    albumName: meta?.name || null,
+    artist: naming.artist || 'Unknown artist',
+    originalAlbumTitle: naming.originalAlbumTitle,
+    originalArtist: naming.originalArtist,
+    trackNameOverrides: naming.trackNameOverrides,
+    artistId: expectedArtistId || meta?.artistId || null,
+    year: meta?.year || null,
+    artworkUrl: meta?.artworkTemplate
+      ? meta.artworkTemplate
+          .replace('{w}', '600')
+          .replace('{h}', '600')
+          .replace('{f}', 'jpg')
+      : null,
+    storefront: storefront || settings.storefront || 'us',
+    quality: normalizeQuality(quality, settings.quality),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    currentTrack: null,
+    message: 'Queued',
+    error: null,
+    finalDir: null,
+    missingTracks,
+    variant,
+    upc: meta?.upc || null,
+    trackIsrcs: (meta?.tracks || [])
+      .filter((t) => t.isrc)
+      .map((t) => ({ name: t.name || '', trackNumber: t.trackNumber || null, isrc: t.isrc })),
+    stats: { total: missingTracks?.length || meta?.trackCount || 0, done: 0, failed: 0 },
+  }
+  state.jobs.set(id, job)
+  state.queue.push(id)
+  persistJob(job, true)
+  emitEvent('job.created', jobPublic(job))
+  setImmediate(tickQueue)
+  return jobPublic(job)
+}
+
+export async function enqueuePlaylist(opts) {
+  const { playlistId, libraryId } = opts || {}
+  if (!playlistId && !libraryId) {
+    throw new Error('playlistId or libraryId required')
+  }
+  if (libraryId) {
+    return coalesceEnqueue(`library-playlist:${libraryId}`, () => enqueueLibraryPlaylist(opts))
+  }
+  return coalesceEnqueue(`playlist:${playlistId}`, () => createPlaylistJob(opts))
+}
+
+async function createPlaylistJob({ playlistId, storefront, quality }) {
+
+  for (const j of state.jobs.values()) {
+    if (
+      j.kind === 'playlist' &&
+      j.playlistId === playlistId &&
+      (j.status === 'queued' || j.status === 'running')
+    ) {
+      return jobPublic(j)
+    }
+  }
+
+  if (await isPlaylistInLibrary(playlistId)) {
+    throw alreadyInLibraryError('Already in library')
+  }
+
+  const id = crypto.randomUUID()
+  const settings = await readSettings()
+
+  let meta = null
+  try {
+    const raw = await getPlaylist({
+      storefront: storefront || settings.storefront,
+      id: playlistId,
+      language: settings.language,
+    })
+    meta = normalizePlaylist(raw?.data?.[0])
+  } catch (err) {
+    console.error('playlist metadata lookup failed', err.message)
+  }
+
+  // Playlist titles/curators get the same display-vs-original resolution as
+  // albums (one extra paced+cached lookup, only when the mode needs it).
+  // Per-track playlist renaming is deliberately not done here — see README's
+  // "Language support" follow-up section: a playlist can span many artists
+  // and storefronts, so per-track original-name lookups would multiply
+  // Apple API calls in exactly the way the rate-limit constraint warns
+  // against.
+  let playlistTitle = meta?.name || null
+  let curatorName = meta?.curatorName || null
+  let originalPlaylistTitle = null
+  const namingMode = settings.namingLanguageMode || 'display'
+  if (namingMode !== 'display' && meta) {
+    try {
+      const original = await getOriginalPlaylistMeta({
+        storefront: storefront || settings.storefront,
+        playlistId,
+      })
+      if (original) {
+        const acceptedLanguages = Array.isArray(settings.acceptedLanguages)
+          ? settings.acceptedLanguages
+          : []
+        playlistTitle = resolveMetadataName({
+          mode: namingMode,
+          displayName: meta.name,
+          originalName: original.name,
+          acceptedLanguages,
+        })
+        curatorName = resolveMetadataName({
+          mode: namingMode,
+          displayName: meta.curatorName,
+          originalName: original.curatorName,
+          acceptedLanguages,
+        })
+        originalPlaylistTitle =
+          original.name && original.name !== meta.name ? original.name : null
+      }
+    } catch (err) {
+      console.error('playlist original-language lookup failed', err.message)
+    }
+  }
+
+  const job = {
+    id,
+    kind: 'playlist',
+    status: 'queued',
+    progress: 0,
+    albumId: '',
+    playlistId,
+    libraryPlaylistId: null,
+    sourceUrl:
+      meta?.url ||
+      `https://music.apple.com/${encodeURIComponent(storefront || settings.storefront || 'us')}/playlist/_/${encodeURIComponent(playlistId)}`,
+    albumTitle: playlistTitle || 'Unknown playlist',
+    artist: curatorName || 'Apple Music',
+    originalAlbumTitle: originalPlaylistTitle,
+    artistId: meta?.curatorId || null,
+    year: null,
+    artworkUrl: meta?.artworkTemplate
+      ? meta.artworkTemplate
+          .replace('{w}', '600')
+          .replace('{h}', '600')
+          .replace('{f}', 'jpg')
+      : null,
+    storefront: storefront || settings.storefront || 'us',
+    quality: normalizeQuality(quality, settings.quality),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    currentTrack: null,
+    message: 'Queued',
+    error: null,
+    finalDir: null,
+    stats: { total: meta?.trackCount || meta?.tracks?.length || 0, done: 0, failed: 0 },
+  }
+
+  state.jobs.set(id, job)
+  state.queue.push(id)
+  persistJob(job, true)
+  emitEvent('job.created', jobPublic(job))
+  setImmediate(tickQueue)
+  return jobPublic(job)
+}
+
+async function enqueueLibraryPlaylist({ libraryId, storefront, quality }) {
+  if (!libraryId) throw new Error('libraryId required')
+
+  for (const j of state.jobs.values()) {
+    if (
+      j.kind === 'playlist' &&
+      j.libraryPlaylistId === libraryId &&
+      (j.status === 'queued' || j.status === 'running')
+    ) {
+      return jobPublic(j)
+    }
+  }
+
+  if (await isPlaylistInLibrary(libraryId)) {
+    throw alreadyInLibraryError('Already in library')
+  }
+
+  const settings = await readSettings()
+  const creds = await readAppleCreds()
+  if (!creds.mediaUserToken) {
+    const err = new Error('media-user-token not configured')
+    err.code = 'NO_MEDIA_USER_TOKEN'
+    err.statusCode = 412
+    throw err
+  }
+
+  const detail = await getLibraryPlaylistDetail({
+    libraryId,
+    mediaUserToken: creds.mediaUserToken,
+    language: settings.language,
+  })
+  if (!detail) {
+    throw new Error('library playlist not found')
+  }
+  if (detail.catalogId && (await isPlaylistInLibrary(detail.catalogId))) {
+    throw alreadyInLibraryError('Already in library')
+  }
+  const playlistTracks = detail.tracks
+    .filter((t) => t.catalogId)
+    .map((t) => ({
+      catalogId: t.catalogId,
+      name: t.name,
+      artistName: t.artistName,
+      albumName: t.albumName,
+      durationMs: t.durationMs,
+    }))
+  if (playlistTracks.length === 0) {
+    throw new Error('playlist has no downloadable catalog tracks')
+  }
+
+  const id = crypto.randomUUID()
+  const job = {
+    id,
+    kind: 'playlist',
+    status: 'queued',
+    progress: 0,
+    albumId: '',
+    playlistId: detail.catalogId || null,
+    libraryPlaylistId: libraryId,
+    sourceUrl: null,
+    albumTitle: detail.name || 'Untitled playlist',
+    artist: detail.curatorName || 'You',
+    artistId: null,
+    year: null,
+    artworkUrl: detail.artworkTemplate
+      ? detail.artworkTemplate
+          .replace('{w}', '600')
+          .replace('{h}', '600')
+          .replace('{f}', 'jpg')
+      : null,
+    storefront: storefront || settings.storefront || 'us',
+    quality: normalizeQuality(quality, settings.quality),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    currentTrack: null,
+    message: 'Queued',
+    error: null,
+    finalDir: null,
+    playlistTracks,
+    undownloadableCount: detail.undownloadableCount,
+    stats: { total: playlistTracks.length, done: 0, failed: 0 },
+  }
+
+  state.jobs.set(id, job)
+  state.queue.push(id)
+  persistJob(job, true)
+  emitEvent('job.created', jobPublic(job))
+  setImmediate(tickQueue)
+  return jobPublic(job)
+}
+
+export async function enqueueSong(opts) {
+  if (!opts?.songId) throw new Error('songId required')
+  const key = `${opts.discovery ? 'discovery-' : ''}song:${opts.songId}`
+  return coalesceEnqueue(key, () => createSongJob(opts))
+}
+
+async function createSongJob({ songId, albumId, storefront, quality, followedPlaylistId, discovery = false }) {
+
+  for (const j of state.jobs.values()) {
+    if (
+      j.kind === 'song' &&
+      j.songId === songId &&
+      (j.status === 'queued' || j.status === 'running')
+    ) {
+      return jobPublic(j)
+    }
+  }
+
+  const id = crypto.randomUUID()
+  const settings = await readSettings()
+  const sf = storefront || settings.storefront
+  let resolvedAlbumId = albumId || null
+  if (!resolvedAlbumId) {
+    try {
+      const raw = await getSong({ storefront: sf, id: songId, language: settings.language })
+      const songData = raw?.data?.[0]
+      const albumRel = songData?.relationships?.albums?.data?.[0]?.id
+      if (albumRel) resolvedAlbumId = String(albumRel)
+    } catch (err) {
+      console.error('song catalog lookup failed', err.message)
+    }
+    if (!resolvedAlbumId) {
+      throw new Error('Could not resolve parent album for song')
+    }
+  }
+
+  let meta = null
+  let trackMeta = null
+  try {
+    const raw = await getAlbum({
+      storefront: sf,
+      id: resolvedAlbumId,
+      language: settings.language,
+    })
+    meta = normalizeAlbum(raw?.data?.[0])
+    const tracks = raw?.data?.[0]?.relationships?.tracks?.data || []
+    trackMeta = tracks.find((t) => t.id === songId) || null
+  } catch (err) {
+    console.error('song metadata lookup failed', err.message)
+  }
+
+  if (trackMeta && !isReleasedTrack(trackMeta)) throw notReleasedError(meta?.releaseDate)
+
+  const trackName = trackMeta?.attributes?.name || 'Unknown track'
+  const trackIsrc = trackMeta?.attributes?.isrc || null
+
+  if (
+    meta?.artistName &&
+    trackName &&
+    trackName !== 'Unknown track' &&
+    (await hasSongInLibrary(meta.artistName, trackName, null, trackIsrc))
+  ) {
+    throw alreadyInLibraryError('Already in library')
+  }
+
+  const naming = await resolveAlbumNaming({
+    settings,
+    storefront: sf,
+    albumId: resolvedAlbumId,
+    meta,
+  })
+  const trackOverride = naming.trackNameOverrides.find((t) => t.id === songId) || null
+
+  const job = {
+    id,
+    kind: 'song',
+    status: 'queued',
+    progress: 0,
+    albumId: resolvedAlbumId,
+    songId,
+    followedPlaylistId: followedPlaylistId || null,
+    discovery: Boolean(discovery),
+    albumTitle: trackOverride?.resolvedName || trackName,
+    resolvedAlbumTitle: naming.albumTitle,
+    originalAlbumTitle: naming.originalAlbumTitle,
+    originalArtist: naming.originalArtist,
+    originalTrackTitle: trackOverride?.originalName || null,
+    trackNameOverrides: trackOverride ? [trackOverride] : [],
+    artist: naming.artist || 'Unknown artist',
+    artistId: meta?.artistId || null,
+    year: meta?.year || null,
+    artworkUrl: meta?.artworkTemplate
+      ? meta.artworkTemplate
+          .replace('{w}', '600')
+          .replace('{h}', '600')
+          .replace('{f}', 'jpg')
+      : null,
+    storefront: storefront || settings.storefront || 'us',
+    quality: normalizeQuality(quality, settings.quality),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    currentTrack: null,
+    message: 'Queued',
+    error: null,
+    finalDir: null,
+    isrc: trackIsrc || null,
+    upc: meta?.upc || null,
+    stats: { total: 1, done: 0, failed: 0 },
+  }
+  state.jobs.set(id, job)
+  state.queue.push(id)
+  persistJob(job, true)
+  emitEvent('job.created', jobPublic(job))
+  setImmediate(tickQueue)
+  return jobPublic(job)
+}
+
+export async function cancelJob(id) {
+  const j = state.jobs.get(id)
+  if (!j) return { ok: false, error: 'not found' }
+  if (j.status === 'done' || j.status === 'failed') {
+    return { ok: true, noop: true }
+  }
+  if (importingJobs.has(id)) {
+    return { ok: false, error: 'already moving into the library' }
+  }
+  const ctl = state.running.get(id)
+  const wasActive = state.active.has(id)
+  if (ctl) ctl.abort()
+  jobAborts.get(id)?.abort()
+  state.queue = state.queue.filter((qid) => qid !== id)
+  updateJob(id, {
+    status: 'failed',
+    error: 'Cancelled',
+    message: 'Cancelled',
+    cancelled: true,
+  })
+  if (!ctl && !wasActive) appendHistory(j).catch(() => {})
+  return { ok: true }
+}
+
+export async function cancelAllJobs() {
+  const ids = new Set([
+    ...state.queue,
+    ...state.active,
+    ...state.running.keys(),
+  ])
+  let cancelled = 0
+  for (const id of ids) {
+    const j = state.jobs.get(id)
+    if (!j || j.status === 'done' || j.status === 'failed') continue
+    const result = await cancelJob(id)
+    if (result.ok && !result.noop) cancelled += 1
+  }
+  return { ok: true, cancelled }
+}
+
+const STAGING_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000
+let stagingSweepTimer = null
+
+export async function initQueue() {
+  const nameLimit = await detectNameByteLimit([MUSIC_ROOT, STAGING_ROOT_OUTSIDE])
+  if (nameLimit < 255) console.log(`[library] file names limited to ${nameLimit} bytes by the filesystem`)
+  await sweepStagingRoots()
+  await ensureDiscoveryFolder().catch((err) => console.error('[discovery] folder setup failed:', err.message))
+  await cleanOldDiscoveries().catch((err) => console.error('[discovery] cleanup failed:', err.message))
+  if (!stagingSweepTimer) {
+    stagingSweepTimer = setInterval(() => {
+      sweepStagingRoots().catch((err) => {
+        console.error('staging sweep failed:', err.message)
+      })
+      cleanOldDiscoveries().catch((err) => console.error('[discovery] cleanup failed:', err.message))
+    }, STAGING_SWEEP_INTERVAL_MS)
+    stagingSweepTimer.unref?.()
+  }
+  try {
+    importLegacyHistory(getDb())
+  } catch (err) {
+    console.error('history import failed:', err.message)
+  }
+  try {
+    state.paused = getMeta(QUEUE_PAUSED_KEY) === '1'
+  } catch {}
+  restorePersistedJobs()
+  setImmediate(tickQueue)
+}
+
+export const __test__ = {
+  persistJob,
+  restorePersistedJobs,
+  matchTrackForFile,
+  resolveAlbumNaming,
+  renameTrackFilesForLanguage,
+  assertAmdpResult,
+  isSkippableTrackError,
+  renumberFromTrackTag,
+  emitJobUpdate,
+  isProgressOnlyLine,
+  catalogPlaylistTracksIfAnyOwned,
+  updateJob,
+  handleAmdpLine,
+  createProgressState,
+  state,
+  wakeAndWaitForWrapper,
+  tickQueue,
+  importingJobs,
+  applyQobuzFileNames,
+  restoreTrackFileName,
+  restoreTrackFileNames,
+  nameTooLongMessage,
+}
+
+// Stamp ISRC/BARCODE tags onto downloaded FLACs so presence matching has an
+// artist-name-independent anchor (collab albums import under a different
+// artist folder than Apple's album-level artistName). Fail-soft by design.
+function matchTrackForFile(fileName, tracks) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return null
+  const base = path.basename(fileName, path.extname(fileName))
+  const numMatch = base.match(/^(\d{1,3})[.\- ]/)
+  if (numMatch) {
+    const byNumber = tracks.find(
+      (t) => t && Number(t.trackNumber) === Number(numMatch[1]),
+    )
+    if (byNumber) return byNumber
+  }
+  const fileTitle = normalizeForMatchKey(songNameFromFilename(fileName)).toLowerCase()
+  if (!fileTitle) return null
+  return (
+    tracks.find(
+      (t) =>
+        t &&
+        normalizeForMatchKey(t.name || '').toLowerCase() === fileTitle,
+    ) || null
+  )
+}
+
+async function stampAlbumIdentityTags(dir, upc, tracks, { originalAlbum, originalArtist } = {}) {
+  try {
+    const entries = await fsp.readdir(dir)
+    for (const name of entries) {
+      if (!/\.flac$/i.test(name)) continue
+      const track = matchTrackForFile(name, tracks)
+      const isrc = track?.isrc || null
+      const extra = {}
+      // track.originalName is only present when tracks === job.trackNameOverrides
+      // (naming mode 'original-if-accepted'/'dual'); plain job.trackIsrcs
+      // entries don't carry it, so this is a no-op in 'display' mode.
+      if (track?.originalName && track.originalName !== track.name) {
+        extra.ORIGINAL_TITLE = track.originalName
+      }
+      if (originalAlbum) extra.ORIGINAL_ALBUM = originalAlbum
+      if (originalArtist) extra.ORIGINAL_ARTIST = originalArtist
+      if (!isrc && !upc && Object.keys(extra).length === 0) continue
+      await writeAudioIdentityTags(path.join(dir, name), {
+        isrc,
+        upc,
+        extra: Object.keys(extra).length ? extra : undefined,
+      })
+    }
+  } catch (err) {
+    console.error('identity tag stamping failed:', err.message)
+  }
+}
+
+// Converts a staging folder to FLAC, reporting per-track progress on the
+// job. Shared by album, song and catalog playlist downloads.
+async function convertStagingToFlac(job, dir, progressState) {
+  applyProgress(job, progressState, {
+    message: 'Converting to FLAC',
+    currentTrack: null,
+  })
+  const conv = await convertDirToFlac(dir, {
+    signal: jobSignal(job),
+    onProgress: ({ index, total }) => {
+      if (total > 0) {
+        progressState.convertTotal = total
+      }
+      progressState.convertDone = Math.max(
+        progressState.convertDone,
+        Math.min(progressState.convertTotal || index, index),
+      )
+      applyProgress(job, progressState, {
+        message: `Converting to FLAC (${index}/${progressState.convertTotal || total || index})`,
+      })
+    },
+  })
+  job.stats.converted = conv.converted
+  job.stats.flacFailed = conv.failed
+  if (conv.total > 0) {
+    progressState.convertTotal = conv.total
+    progressState.convertDone = Math.max(progressState.convertDone, conv.total)
+  }
+  progressState.convertDone = Math.max(
+    progressState.convertDone,
+    progressState.convertTotal,
+  )
+  applyProgress(job, progressState, {
+    message: 'Converting to FLAC',
+  })
+}
+
+// amdp cuts long titles short in its file names (see amdpNameCharLimit);
+// puts the full title from the tags back, as far as the filesystem allows.
+function restoreTrackFileName(fileName, title) {
+  const ext = path.extname(fileName)
+  const m = /^(\d+\.\s)(.+)$/.exec(path.basename(fileName, ext))
+  if (!m || !title) return fileName
+  const full = restoreTruncatedName(m[2], title)
+  return full === m[2] ? fileName : fitFileName(`${m[1]}${full}${ext}`)
+}
+
+async function restoreTrackFileNames(dir) {
+  const files = await fsp.readdir(dir).catch(() => [])
+  for (const fn of files) {
+    if (!/\.(flac|m4a|mp3)$/i.test(fn)) continue
+    // Only a name at amdp's limit can have been cut; skips the tag read.
+    if (Array.from(path.basename(fn, path.extname(fn))).length < amdpNameCharLimit()) continue
+    const { title } = await readAudioMetaTags(path.join(dir, fn))
+    const restored = restoreTrackFileName(fn, title)
+    if (restored === fn) continue
+    const src = path.join(dir, fn)
+    const dst = path.join(dir, restored)
+    if (await fsp.stat(dst).catch(() => null)) continue
+    await moveFileSafe(src, dst)
+    await moveLyricsSidecars(src, dst)
+  }
+}
+
+// Renames the audio and lyrics files in a staging folder to the qobuz
+// naming convention before they are moved. A file whose new name is
+// already taken keeps its name.
+async function applyQobuzFileNames(dir) {
+  const files = await fsp.readdir(dir).catch(() => [])
+  for (const fn of files) {
+    if (!/\.(flac|m4a|mp3|lrc|ttml)$/i.test(fn)) continue
+    const ext = path.extname(fn)
+    const stem = path.basename(fn, ext)
+    const newStem = applyNamingConvention(stem, 'qobuz')
+    if (newStem !== stem) {
+      const dst = path.join(dir, fitFileName(newStem + ext))
+      if (!(await fsp.stat(dst).catch(() => null))) {
+        await fsp.rename(path.join(dir, fn), dst)
+      }
+    }
+  }
+}
+
+async function sweepStagingRoots() {
+  const settings = await readSettings().catch(() => null)
+  const activeStagingRoot = resolveStagingRoot(settings)
+  const inactiveStagingRoot =
+    activeStagingRoot === STAGING_ROOT_OUTSIDE
+      ? STAGING_ROOT_INSIDE
+      : STAGING_ROOT_OUTSIDE
+  await ensureDir(activeStagingRoot)
+  await cleanupStaleStagingDirs(activeStagingRoot)
+  await cleanupStaleStagingDirs(inactiveStagingRoot)
+}
+
+async function cleanupStaleStagingDirs(stagingRoot) {
+  const entries = await fsp.readdir(stagingRoot, { withFileTypes: true }).catch(() => [])
+  const queued = new Set(state.queue)
+  const now = Date.now()
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !JOB_DIR_RE.test(entry.name)) continue
+    if (state.active.has(entry.name) || state.running.has(entry.name) || queued.has(entry.name)) {
+      continue
+    }
+    const abs = path.join(stagingRoot, entry.name)
+    const stat = await fsp.stat(abs).catch(() => null)
+    if (!stat?.isDirectory()) continue
+    const updatedAt = Math.max(
+      Number(stat.mtimeMs) || 0,
+      Number(stat.ctimeMs) || 0,
+      Number(stat.birthtimeMs) || 0,
+    )
+    if (updatedAt <= 0) continue
+    if (now - updatedAt < STAGING_MAX_AGE_MS) continue
+    await fsp.rm(abs, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function tickQueue() {
+  while (!state.paused && state.active.size < MAX_CONCURRENT && state.queue.length > 0) {
+    const id = state.queue.shift()
+    const job = state.jobs.get(id)
+    if (!job || job.status !== 'queued') continue
+    state.active.add(id)
+    runInLane('batch', () => runJob(job)).finally(() => {
+      state.active.delete(id)
+      setImmediate(tickQueue)
+    })
+  }
+}
+
+async function runJob(job) {
+  let jobStaging = null
+  jobAborts.set(job.id, new AbortController())
+  try {
+    throwIfCancelled(job)
+    updateJob(job.id, { status: 'running', message: 'Preparing' })
+    throwIfCancelled(job)
+    const mp4box = await probeMp4Box()
+    if (!mp4box.ok) {
+      throw new Error(
+        `MP4Box preflight failed: ${mp4box.error}. Rebuild the web image so apple-music-dl can finalize MP4 files.`,
+      )
+    }
+    let wrapperHealth = await probeWrapperPorts()
+    if (!wrapperHealth.ok) {
+      updateJob(job.id, { message: 'Waiting for the wrapper to start' })
+      wrapperHealth = await wakeAndWaitForWrapper(job)
+    }
+    if (!wrapperHealth.ok) {
+      const failed = wrapperHealth.failedPorts
+        .map((p) => `${p.name}:${p.port}(${p.error})`)
+        .join(', ')
+      const e = new Error(`wrapper not reachable (${failed})`)
+      e.code = 'WRAPPER_DOWN'
+      emitEvent('wrapper.health', { ok: false, failedPorts: wrapperHealth.failedPorts })
+      throw e
+    }
+    const settings = await readSettings()
+    const stagingRoot = resolveStagingRoot(settings)
+    await ensureDir(stagingRoot)
+    jobStaging = path.join(stagingRoot, job.id)
+    await ensureDir(jobStaging)
+    throwIfCancelled(job)
+
+    const quality = normalizeQuality(job.quality, settings.quality)
+    job.quality = quality
+    const progressState = createProgressState(job, {
+      convertEnabled: quality === 'flac',
+    })
+    const creds = await readAppleCreds()
+    await writeAmdpConfig({
+      settings,
+      mediaUserToken: creds.mediaUserToken,
+      stagingRoot: jobStaging,
+    })
+    await preflightMusicTarget(settings, job)
+    const tracks = Number(job.stats?.total) || 1
+    await assertFreeSpace({
+      stagingRoot,
+      musicRoot: MUSIC_ROOT,
+      bytes: estimateJobBytes(
+        job.kind === 'playlist' ? Math.min(tracks, PLAYLIST_SPACE_TRACK_CAP) : tracks,
+        quality,
+      ),
+      stagingFactor: quality === 'flac' ? 2 : 1,
+    })
+    throwIfCancelled(job)
+
+    if (
+      job.kind === 'album' &&
+      Array.isArray(job.missingTracks) &&
+      job.missingTracks.length > 0
+    ) {
+      await runPartialAlbumFill({
+        job,
+        jobStaging,
+        settings,
+        creds,
+        quality,
+        progressState,
+      })
+      return
+    }
+
+    if (
+      job.kind === 'playlist' &&
+      Array.isArray(job.playlistTracks) &&
+      job.playlistTracks.length > 0
+    ) {
+      await runLibraryPlaylistFill({
+        job,
+        jobStaging,
+        settings,
+        creds,
+        quality,
+        progressState,
+      })
+      return
+    }
+
+    if (job.kind === 'playlist' && job.playlistId && !job.libraryPlaylistId) {
+      const tracks = await catalogPlaylistTracksIfAnyOwned(job, settings).catch((err) => {
+        console.error(`[job ${job.id}] catalog playlist track lookup failed:`, err.message)
+        return null
+      })
+      if (tracks) {
+        job.playlistTracks = tracks
+        await runLibraryPlaylistFill({
+          job,
+          jobStaging,
+          settings,
+          creds,
+          quality,
+          progressState,
+        })
+        return
+      }
+    }
+
+    const isSong = job.kind === 'song'
+    const isPlaylist = job.kind === 'playlist'
+    // In the default 'display' mode, finalDir naming must stay byte-for-byte
+    // identical to pre-language-feature behavior: the actual folder amdp put
+    // on disk (firstArtist.name / firstAlbum.name), not our own catalog
+    // fetch's name, in case the two differ in some edge case (sanitization,
+    // an explicit-tag suffix, etc). Only override with the resolved
+    // job.artist / job.albumTitle when a naming-language mode actually
+    // requires it.
+    const useLanguageNaming = (settings.namingLanguageMode || 'display') !== 'display'
+    const baseUrl = `https://music.apple.com/${encodeURIComponent(job.storefront)}/album/_/${encodeURIComponent(job.albumId)}`
+    const playlistUrl =
+      job.sourceUrl ||
+      `https://music.apple.com/${encodeURIComponent(job.storefront)}/playlist/_/${encodeURIComponent(job.playlistId || '')}`
+    const url = isPlaylist
+      ? playlistUrl
+      : isSong
+        ? `${baseUrl}?i=${encodeURIComponent(job.songId)}`
+        : baseUrl
+
+    throwIfCancelled(job)
+    let downloadResult = await runAmdpDownload({
+      job,
+      jobStaging,
+      url,
+      quality,
+      isSong,
+      progressState,
+    })
+    let combined = `${downloadResult.stdout}\n${downloadResult.stderr}`
+    if (quality === 'atmos' && job.variant && (await shouldFallbackAtmosToFlac(downloadResult, combined, jobStaging))) {
+      throw new Error('Atmos is not available for this album; the lossless version is already in the library')
+    }
+    if (quality === 'atmos' && (await shouldFallbackAtmosToFlac(downloadResult, combined, jobStaging))) {
+      await fsp.rm(jobStaging, { recursive: true, force: true })
+      await ensureDir(jobStaging)
+      await writeAmdpConfig({
+        settings,
+        mediaUserToken: creds.mediaUserToken,
+        stagingRoot: jobStaging,
+      })
+      job.landingQuality = 'flac'
+      progressState.downloadDone = 0
+      progressState.downloadPartial = 0
+      progressState.convertDone = 0
+      progressState.finalizeProgress = 0
+      setConversionEnabled(progressState, true)
+      applyProgress(job, progressState, {
+        message: 'Atmos unavailable; downloading FLAC fallback',
+        currentTrack: null,
+      })
+      downloadResult = await runAmdpDownload({
+        job,
+        jobStaging,
+        url,
+        quality: 'flac',
+        isSong,
+        progressState,
+      })
+      combined = `${downloadResult.stdout}\n${downloadResult.stderr}`
+    }
+    const partial = assertAmdpResult(downloadResult, combined)
+    const partialSuffix = failedTracksSuffix(partial?.failed, partial?.reason)
+
+    progressState.downloadDone = progressState.downloadTotal
+    progressState.downloadPartial = 0
+    applyProgress(job, progressState, {
+      message: progressState.convertEnabled
+        ? 'Preparing FLAC conversion'
+        : 'Finalizing import',
+      currentTrack: null,
+    })
+
+    if (isPlaylist) {
+      if (progressState.convertEnabled) {
+        await convertStagingToFlac(job, jobStaging, progressState)
+      }
+
+      progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.55)
+      applyProgress(job, progressState, {
+        message: 'Moving into library',
+        currentTrack: null,
+      })
+
+      beginLibraryImport(job)
+      const importedTracks = await importPlaylistTracks({
+        job,
+        jobStaging,
+        onProgress: ({ done, total }) => {
+          if (total > 0) {
+            progressState.finalizeProgress = Math.max(
+              progressState.finalizeProgress,
+              0.55 + (Math.min(total, done) / total) * 0.35,
+            )
+            applyProgress(job, progressState, {
+              message: `Moving into library (${done}/${total})`,
+              currentTrack: null,
+            })
+          }
+        },
+      })
+      if (importedTracks.length === 0) {
+        throw new Error('no audio files in final folder')
+      }
+      job.stats.done = importedTracks.length
+
+      progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.93)
+      applyProgress(job, progressState, {
+        message: 'Writing playlist file',
+        currentTrack: null,
+      })
+      const playlistPath = await writePlaylistM3U({
+        playlistName: job.albumTitle,
+        playlistId: job.playlistId,
+        tracks: importedTracks,
+        artworkTemplate: job.artworkUrl,
+      })
+      await applyPlaylistFolderCover(playlistPath, job)
+
+      try {
+        await fsp.rm(jobStaging, { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+
+      progressState.finalizeProgress = 1
+      applyProgress(job, progressState, {
+        message: 'Finalizing import',
+        currentTrack: null,
+      })
+
+      updateJob(job.id, {
+        status: 'done',
+        progress: 100,
+        message: playlistDoneMessage(job, importedTracks.length, partialSuffix),
+        finalDir: path.dirname(playlistPath),
+      })
+      await appendHistory(job)
+      await creditImportedFiles(importedTracks)
+      afterLibraryChange(job)
+      return
+    }
+
+    const artistDirs = await fsp.readdir(jobStaging, { withFileTypes: true })
+    const firstArtist = artistDirs.find((e) => e.isDirectory())
+    if (!firstArtist) {
+      const tail = combined.slice(-600).trim()
+      throw new Error(
+        `amdp produced no artist folder. amdp output tail: ${tail || '(empty)'}`,
+      )
+    }
+    const artistPath = path.join(jobStaging, firstArtist.name)
+    const albumDirs = await fsp.readdir(artistPath, { withFileTypes: true })
+    const firstAlbum = albumDirs.find((e) => e.isDirectory())
+    if (!firstAlbum) throw new Error('amdp produced no album folder')
+    const albumPath = path.join(artistPath, firstAlbum.name)
+    if (partial) await removeOrphanLyrics(albumPath)
+
+    if (settings.lyricsFormat === 'both') await syncDualLyricsInDir(jobStaging)
+
+    if (progressState.convertEnabled) {
+      await convertStagingToFlac(job, albumPath, progressState)
+    }
+
+    if (!isSong && !isPlaylist) {
+      const tagTracks = job.trackNameOverrides?.length ? job.trackNameOverrides : job.trackIsrcs
+      await stampAlbumIdentityTags(albumPath, job.upc, tagTracks, {
+        originalAlbum: job.originalAlbumTitle,
+        originalArtist: job.originalArtist,
+      })
+    }
+
+    if (!isSong) {
+      progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.35)
+      applyProgress(job, progressState, {
+        message: 'Extracting cover art',
+        currentTrack: null,
+      })
+      await extractFolderArt(albumPath, { size: 1000 }).catch(() => null)
+    }
+
+    await restoreTrackFileNames(albumPath)
+
+    const finalFiles = await fsp.readdir(albumPath)
+    const audioCount = finalFiles.filter((f) =>
+      /\.(flac|m4a|mp3)$/i.test(f),
+    ).length
+    if (audioCount === 0) throw await explainNoAudio(job)
+
+    beginLibraryImport(job)
+    const convention = settings.namingConvention || 'apple'
+
+    let finalDir
+    if (isSong) {
+      // Songs import straight into their parent album folder so every
+      // download lands in the same Artist/Album/Track structure with the
+      // original amdp filenames (and their embedded metadata) preserved.
+      const albumDirName =
+        (useLanguageNaming && job.resolvedAlbumTitle) ||
+        restoreTruncatedName(firstAlbum.name, job.resolvedAlbumTitle).replace(/\s*\(\d{4}\)\s*$/, '')
+      const rawAlbumName = applyNamingConvention(albumDirName, convention)
+      finalDir = await computeFinalDir(
+        libraryRootFor(MUSIC_ROOT, job),
+        (useLanguageNaming && job.artist) || restoreTruncatedName(firstArtist.name, job.artist),
+        rawAlbumName,
+        job.year,
+      )
+      await ensureDir(finalDir)
+
+      if (convention === 'qobuz') await applyQobuzFileNames(albumPath)
+
+      if (settings.namingLanguageMode !== 'display' && job.trackNameOverrides?.length) {
+        await renameTrackFilesForLanguage(albumPath, job.trackNameOverrides)
+      }
+
+      const movedFiles = await fsp.readdir(albumPath)
+      const audioFiles = movedFiles.filter((f) => /\.(flac|m4a|mp3)$/i.test(f))
+      if (audioFiles.length === 0) throw new Error('no audio file to move')
+      progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.7)
+      applyProgress(job, progressState, {
+        message: 'Moving into library',
+        currentTrack: null,
+      })
+      for (const fn of audioFiles) {
+        const srcAudioPath = path.join(albumPath, fn)
+        const destAudioPath = path.join(finalDir, fitFileName(fn))
+        await moveFileSafe(srcAudioPath, destAudioPath)
+        await moveLyricsSidecars(srcAudioPath, destAudioPath)
+      }
+      await copyFolderArtIfAny(albumPath, finalDir)
+      const songExtra = {}
+      if (job.originalTrackTitle) songExtra.ORIGINAL_TITLE = job.originalTrackTitle
+      if (job.originalAlbumTitle) songExtra.ORIGINAL_ALBUM = job.originalAlbumTitle
+      if (job.originalArtist) songExtra.ORIGINAL_ARTIST = job.originalArtist
+      if (job.isrc || job.upc || Object.keys(songExtra).length > 0) {
+        for (const fn of audioFiles) {
+          await writeAudioIdentityTags(path.join(finalDir, fn), {
+            isrc: job.isrc,
+            upc: job.upc,
+            extra: Object.keys(songExtra).length ? songExtra : undefined,
+          })
+        }
+      }
+      await writeVersionMarker(finalDir, job.quality, { ifMissing: true })
+    } else {
+      const albumDirName =
+        (useLanguageNaming && job.albumTitle) ||
+        restoreTruncatedName(firstAlbum.name, job.albumTitle).replace(/\s*\(\d{4}\)\s*$/, '')
+      const rawAlbumName = applyNamingConvention(albumDirName, convention)
+      finalDir = await computeFinalDir(
+        libraryRootFor(MUSIC_ROOT, job),
+        (useLanguageNaming && job.artist) || restoreTruncatedName(firstArtist.name, job.artist),
+        rawAlbumName,
+        job.year,
+      )
+      if (job.variant) {
+        finalDir = applyVariantSuffix(finalDir, job.variant, job.quality)
+      }
+
+      if (convention === 'qobuz') await applyQobuzFileNames(albumPath)
+
+      if (settings.namingLanguageMode !== 'display' && job.trackNameOverrides?.length) {
+        await renameTrackFilesForLanguage(albumPath, job.trackNameOverrides)
+      }
+
+      progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.75)
+      applyProgress(job, progressState, {
+        message: 'Moving into library',
+        currentTrack: null,
+      })
+      await mergeMove(albumPath, finalDir)
+      await writeVersionMarker(finalDir, job.quality)
+    }
+
+    try {
+      await fsp.rm(albumPath, { recursive: true, force: true })
+      await fsp.rmdir(artistPath)
+      await fsp.rmdir(jobStaging)
+    } catch {
+      /* ignore */
+    }
+
+    progressState.finalizeProgress = 1
+    applyProgress(job, progressState, {
+      message: 'Finalizing import',
+      currentTrack: null,
+    })
+
+    updateJob(job.id, {
+      status: 'done',
+      progress: 100,
+      message: isSong ? 'Imported track' : `Imported ${audioCount} tracks${partialSuffix}`,
+      finalDir,
+    })
+    invalidateLibraryCache()
+    await appendHistory(job)
+    await creditImportedFiles([finalDir])
+    afterLibraryChange(job)
+    queueAnimatedArtworkForJob(job, finalDir)
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      updateJob(job.id, {
+        status: 'failed',
+        error: 'Cancelled',
+        message: 'Cancelled',
+        cancelled: true,
+      })
+    } else if (err.code === 'NOT_RELEASED' || err.code === 'NOT_AVAILABLE') {
+      // Nothing went wrong on our side; shown muted rather than as an error.
+      updateJob(job.id, {
+        status: 'failed',
+        error: err.message,
+        message: err.message,
+        cancelled: false,
+        unavailable: true,
+      })
+    } else {
+      console.error(`[job ${job.id}] failed:`, err)
+      const error = err.code === 'ENAMETOOLONG' ? nameTooLongMessage(err) : err.message
+      updateJob(job.id, {
+        status: 'failed',
+        error,
+        message: `Failed: ${error}`,
+        cancelled: false,
+      })
+    }
+    await appendHistory(job).catch(() => {})
+  } finally {
+    if (jobStaging) {
+      await fsp.rm(jobStaging, { recursive: true, force: true }).catch(() => {})
+    }
+    state.running.delete(job.id)
+    jobAborts.delete(job.id)
+    importingJobs.delete(job.id)
+  }
+}
+
+// amdp finishing without any audio usually means Apple had nothing to give:
+// the track is not out yet, or not offered in this storefront.
+// Names only the file, shortened, so the message stays readable.
+function nameTooLongMessage(err) {
+  const name = path.basename(err.dest || err.path || '')
+  const chars = Array.from(name)
+  const shown = chars.length > 60 ? `${chars.slice(0, 50).join('')}…${path.extname(name)}` : name
+  return `file name too long: ${shown || 'unknown file'}`
+}
+
+async function explainNoAudio(job) {
+  try {
+    const raw = await getAlbum({ storefront: job.storefront, id: job.albumId })
+    const album = raw?.data?.[0]
+    const tracks = (album?.relationships?.tracks?.data || []).filter((t) => t?.type !== 'music-videos')
+    const wanted = job.songId ? tracks.filter((t) => t.id === job.songId) : tracks
+    if (wanted.length && wanted.every((t) => !isReleasedTrack(t))) {
+      if (album?.attributes?.isPrerelease) return notReleasedError(album.attributes.releaseDate)
+      const err = new Error('Not available on Apple Music in this storefront')
+      err.code = 'NOT_AVAILABLE'
+      return err
+    }
+  } catch {}
+  return new Error('Apple returned no audio for this download')
+}
+
+// Downloads one track into trackStaging, retrying as FLAC when Atmos is
+// unavailable. Throws when the track could not be downloaded.
+async function downloadSingleTrack({ job, trackStaging, settings, creds, url, quality, index, progressState }) {
+  const sub = await runAmdpDownload({
+    job,
+    jobStaging: trackStaging,
+    url,
+    quality,
+    isSong: true,
+    progressState,
+  })
+  const combined = `${sub.stdout}\n${sub.stderr}`
+  if (
+    quality === 'atmos' &&
+    (await shouldFallbackAtmosToFlac(sub, combined, trackStaging))
+  ) {
+    await fsp.rm(trackStaging, { recursive: true, force: true })
+    await ensureDir(trackStaging)
+    await writeAmdpConfig({
+      settings,
+      mediaUserToken: creds.mediaUserToken,
+      stagingRoot: trackStaging,
+    })
+    progressState.downloadDone = index
+    progressState.downloadPartial = 0
+    const retry = await runAmdpDownload({
+      job,
+      jobStaging: trackStaging,
+      url,
+      quality: 'flac',
+      isSong: true,
+      progressState,
+    })
+    assertAmdpResult(retry, `${retry.stdout}\n${retry.stderr}`)
+  } else {
+    assertAmdpResult(sub, combined)
+  }
+  if (settings.lyricsFormat === 'both') await syncDualLyricsInDir(trackStaging)
+}
+
+// A catalog playlist normally runs as one amdp pass, which cannot skip
+// tracks. When some are already owned, return the track list so the job can
+// take the per-track fill instead and reference those songs rather than
+// downloading them again. Returns null when nothing is owned.
+async function catalogPlaylistTracksIfAnyOwned(job, settings, iterate = iterateCatalogPlaylistTracks) {
+  const tracks = []
+  for await (const raw of iterate({
+    storefront: job.storefront,
+    id: job.playlistId,
+    language: settings?.language,
+  })) {
+    if (raw?.type !== 'songs' || !raw.id) continue
+    const a = raw.attributes || {}
+    tracks.push({
+      catalogId: String(raw.id),
+      name: a.name,
+      artistName: a.artistName,
+      albumName: a.albumName,
+      durationMs: a.durationInMillis,
+      isrc: a.isrc || null,
+    })
+  }
+  for (const t of tracks) {
+    if (await findSongPathInLibrary(t.artistName, t.name, t.isrc, null, { album: t.albumName })) {
+      return tracks
+    }
+  }
+  return null
+}
+
+const WRAPPER_WAKE_TIMEOUT_MS = 20_000
+
+// The supervisor may be holding the wrapper back (restart backoff after a lost
+// playback lease); start it now, since this download needs it.
+async function wakeAndWaitForWrapper(job) {
+  await wakeWrapper()
+  const deadline = Date.now() + WRAPPER_WAKE_TIMEOUT_MS
+  let health = await probeWrapperPorts()
+  while (!health.ok && Date.now() < deadline) {
+    throwIfCancelled(job)
+    await new Promise((r) => setTimeout(r, 1000))
+    health = await probeWrapperPorts()
+  }
+  return health
+}
+
+async function runPartialAlbumFill({
+  job,
+  jobStaging,
+  settings,
+  creds,
+  quality,
+  progressState,
+}) {
+  const missing = job.missingTracks || []
+  const baseUrl = `https://music.apple.com/${encodeURIComponent(job.storefront)}/album/_/${encodeURIComponent(job.albumId)}`
+
+  progressState.downloadTotal = missing.length
+  progressState.downloadDone = 0
+  progressState.downloadPartial = 0
+  if (progressState.convertEnabled) {
+    progressState.convertTotal = missing.length
+    progressState.convertDone = 0
+  }
+  job.stats.total = missing.length
+  job.stats.done = 0
+  applyProgress(job, progressState, {
+    message: `Filling missing tracks (0/${missing.length})`,
+    currentTrack: null,
+  })
+
+  let firstArtistName = null
+  let firstAlbumName = null
+  const trackAlbumPaths = []
+  const albumPathToTrack = new Map()
+
+  for (let i = 0; i < missing.length; i += 1) {
+    throwIfCancelled(job)
+    const track = missing[i]
+    const trackStaging = path.join(jobStaging, `t${i}`)
+    await ensureDir(trackStaging)
+    await writeAmdpConfig({
+      settings,
+      mediaUserToken: creds.mediaUserToken,
+      stagingRoot: trackStaging,
+    })
+
+    applyProgress(job, progressState, {
+      message: `Filling missing tracks (${i}/${missing.length})`,
+      currentTrack: track.name || null,
+    })
+
+    const url = `${baseUrl}?i=${encodeURIComponent(track.id)}`
+    progressState.downloadDone = i
+    progressState.downloadPartial = 0
+    progressState.lockDownloadTotal = true
+    try {
+      await downloadSingleTrack({ job, trackStaging, settings, creds, url, quality, index: i, progressState })
+    } catch (err) {
+      if (!isSkippableTrackError(job, err)) throw err
+      recordSkippedTrack(job, progressState, i, track.name || track.id, err)
+      continue
+    }
+
+    const artistDirs = await fsp.readdir(trackStaging, { withFileTypes: true })
+    const artistEntry = artistDirs.find((e) => e.isDirectory())
+    if (!artistEntry) {
+      throw new Error(`amdp produced no artist folder for track ${track.id}`)
+    }
+    const artistPath = path.join(trackStaging, artistEntry.name)
+    const albumDirs = await fsp.readdir(artistPath, { withFileTypes: true })
+    const albumEntry = albumDirs.find((e) => e.isDirectory())
+    if (!albumEntry) {
+      throw new Error(`amdp produced no album folder for track ${track.id}`)
+    }
+    const albumPath = path.join(artistPath, albumEntry.name)
+    if (!firstArtistName) firstArtistName = artistEntry.name
+    if (!firstAlbumName) firstAlbumName = albumEntry.name
+    trackAlbumPaths.push(albumPath)
+    albumPathToTrack.set(albumPath, track)
+
+    progressState.downloadDone = i + 1
+    progressState.downloadPartial = 0
+    job.stats.done = i + 1
+    applyProgress(job, progressState, {
+      message: `Filling missing tracks (${i + 1}/${missing.length})`,
+    })
+  }
+
+  if (!firstArtistName || !firstAlbumName) {
+    throw new Error(job.lastTrackError || 'partial album fill produced no artist/album folder')
+  }
+
+  if (progressState.convertEnabled) {
+    applyProgress(job, progressState, {
+      message: 'Converting to FLAC',
+      currentTrack: null,
+    })
+    let convertedTotal = 0
+    let convertedFailed = 0
+    for (const albumPath of trackAlbumPaths) {
+      const conv = await convertDirToFlac(albumPath, {
+        signal: jobSignal(job),
+        onProgress: ({ index, total }) => {
+          if (total > 0) {
+            progressState.convertTotal = Math.max(progressState.convertTotal, missing.length)
+          }
+          progressState.convertDone = Math.min(
+            progressState.convertTotal,
+            convertedTotal + Math.max(0, index),
+          )
+          applyProgress(job, progressState, {
+            message: `Converting to FLAC (${progressState.convertDone}/${progressState.convertTotal})`,
+          })
+        },
+      })
+      convertedTotal += conv.converted
+      convertedFailed += conv.failed
+      const fillTrack = albumPathToTrack.get(albumPath)
+      await stampAlbumIdentityTags(
+        albumPath,
+        job.upc,
+        fillTrack ? [fillTrack] : null,
+      )
+    }
+    job.stats.converted = convertedTotal
+    job.stats.flacFailed = convertedFailed
+    progressState.convertDone = progressState.convertTotal
+    applyProgress(job, progressState, { message: 'Converting to FLAC' })
+  }
+
+  beginLibraryImport(job)
+  const convention = settings?.namingConvention || 'apple'
+  const albumDirName = restoreTruncatedName(firstAlbumName, job.albumTitle)
+  const finalDir = await computeFinalDir(
+    libraryRootFor(MUSIC_ROOT, job),
+    restoreTruncatedName(firstArtistName, job.artist),
+    applyNamingConvention(albumDirName.replace(/\s*\(\d{4}\)\s*$/, ''), convention),
+    job.year,
+  )
+  for (const albumPath of trackAlbumPaths) await restoreTrackFileNames(albumPath)
+  if (convention === 'qobuz') {
+    for (const albumPath of trackAlbumPaths) await applyQobuzFileNames(albumPath)
+  }
+  progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.5)
+  applyProgress(job, progressState, {
+    message: 'Moving into library',
+    currentTrack: null,
+  })
+  for (const albumPath of trackAlbumPaths) {
+    await mergeMove(albumPath, finalDir)
+  }
+
+  await extractFolderArt(finalDir, { size: 1000 }).catch(() => null)
+
+  try {
+    await fsp.rm(jobStaging, { recursive: true, force: true })
+  } catch {}
+
+  progressState.finalizeProgress = 1
+  applyProgress(job, progressState, {
+    message: 'Finalizing import',
+    currentTrack: null,
+  })
+
+  updateJob(job.id, {
+    status: 'done',
+    progress: 100,
+    message: `Filled ${trackAlbumPaths.length} missing track${trackAlbumPaths.length === 1 ? '' : 's'}${failedTracksSuffix(job.stats.failedTracks, job.lastTrackError)}`,
+    finalDir,
+  })
+  invalidateLibraryCache()
+  await appendHistory(job)
+  await creditImportedFiles(trackAlbumPaths)
+  afterLibraryChange(job)
+  queueAnimatedArtworkForJob(job, finalDir)
+}
+
+async function runLibraryPlaylistFill({
+  job,
+  jobStaging,
+  settings,
+  creds,
+  quality,
+  progressState,
+}) {
+  const tracks = job.playlistTracks || []
+  if (tracks.length === 0) {
+    throw new Error('library playlist has no tracks to download')
+  }
+
+  progressState.downloadTotal = tracks.length
+  progressState.downloadDone = 0
+  progressState.downloadPartial = 0
+  progressState.lockDownloadTotal = true
+  if (progressState.convertEnabled) {
+    progressState.convertTotal = tracks.length
+    progressState.convertDone = 0
+  }
+  job.stats.total = tracks.length
+  job.stats.done = 0
+  applyProgress(job, progressState, {
+    message: `Downloading playlist (0/${tracks.length})`,
+    currentTrack: null,
+  })
+
+  const importedPaths = []
+
+  for (let i = 0; i < tracks.length; i += 1) {
+    throwIfCancelled(job)
+    const track = tracks[i]
+    const trackStaging = path.join(jobStaging, `t${i}`)
+    await ensureDir(trackStaging)
+    await writeAmdpConfig({
+      settings,
+      mediaUserToken: creds.mediaUserToken,
+      stagingRoot: trackStaging,
+    })
+
+    applyProgress(job, progressState, {
+      message: `Downloading playlist (${i}/${tracks.length})`,
+      currentTrack: track.name || null,
+    })
+
+    let albumCatalogId = null
+    let fillTrackIsrc = null
+    try {
+      const raw = await getSong({
+        storefront: job.storefront,
+        id: track.catalogId,
+        language: settings.language,
+      })
+      const songData = raw?.data?.[0]
+      fillTrackIsrc = songData?.attributes?.isrc || null
+      const albumRel = songData?.relationships?.albums?.data?.[0]?.id
+      if (albumRel) albumCatalogId = String(albumRel)
+    } catch (err) {
+      console.error('library playlist song lookup failed', track.catalogId, err.message)
+    }
+    // Tracks already in the library (e.g. from an earlier album download)
+    // are referenced in the m3u8 instead of being downloaded again.
+    const existingPath = await findSongPathInLibrary(
+      track.artistName,
+      track.name,
+      fillTrackIsrc,
+      null,
+      { album: track.albumName },
+    )
+    if (existingPath) {
+      // Copie dans le dossier de la playlist (pas seulement une reference).
+      const copied = await placeInPlaylist({
+        job,
+        srcPath: existingPath,
+        position: i + 1,
+        convention: settings?.namingConvention || 'apple',
+        copy: true,
+      }).catch(() => null)
+      importedPaths.push(copied || existingPath)
+      job.stats.reused = (job.stats.reused || 0) + 1
+      progressState.downloadDone = i + 1
+      job.stats.done = i + 1
+      applyProgress(job, progressState, {
+        message: `Already in library: ${track.name || track.catalogId}`,
+      })
+      continue
+    }
+    if (!albumCatalogId) {
+      job.stats.failed = (job.stats.failed || 0) + 1
+      progressState.downloadDone = i + 1
+      applyProgress(job, progressState, {
+        message: `Skipped ${track.name || track.catalogId} (no album)`,
+      })
+      continue
+    }
+
+    const url = `https://music.apple.com/${encodeURIComponent(job.storefront)}/album/_/${encodeURIComponent(albumCatalogId)}?i=${encodeURIComponent(track.catalogId)}`
+    progressState.downloadDone = i
+    progressState.downloadPartial = 0
+    try {
+      await downloadSingleTrack({ job, trackStaging, settings, creds, url, quality, index: i, progressState })
+    } catch (err) {
+      if (!isSkippableTrackError(job, err)) throw err
+      recordSkippedTrack(job, progressState, i, track.name || track.catalogId, err)
+      continue
+    }
+
+    if (progressState.convertEnabled) {
+      const albumDirs = await collectAlbumStagingDirs(trackStaging)
+      for (const albumPath of albumDirs) {
+        const conv = await convertDirToFlac(albumPath, { signal: jobSignal(job) })
+        progressState.convertDone = Math.min(
+          progressState.convertTotal,
+          progressState.convertDone + (conv.converted || 0),
+        )
+      }
+      applyProgress(job, progressState)
+    }
+
+    beginLibraryImport(job)
+    const importedHere = await importPlaylistTracks({
+      job,
+      jobStaging: trackStaging,
+      onProgress: () => {},
+      position: i + 1,
+    })
+    if (fillTrackIsrc) {
+      for (const importedPath of importedHere) {
+        await writeAudioIdentityTags(importedPath, { isrc: fillTrackIsrc })
+      }
+    }
+    endLibraryImport(job)
+    for (const p of importedHere) importedPaths.push(p)
+
+    progressState.downloadDone = i + 1
+    progressState.downloadPartial = 0
+    job.stats.done = i + 1
+    applyProgress(job, progressState, {
+      message: `Downloading playlist (${i + 1}/${tracks.length})`,
+    })
+  }
+
+  if (importedPaths.length === 0) {
+    throw new Error(job.lastTrackError || 'no tracks were imported from playlist')
+  }
+
+  beginLibraryImport(job)
+  progressState.finalizeProgress = Math.max(progressState.finalizeProgress, 0.93)
+  applyProgress(job, progressState, {
+    message: 'Writing playlist file',
+    currentTrack: null,
+  })
+  const playlistPath = await writePlaylistM3U({
+    playlistName: job.albumTitle,
+    playlistId: job.playlistId,
+    libraryPlaylistId: job.libraryPlaylistId,
+    tracks: importedPaths,
+    artworkTemplate: job.artworkUrl,
+  })
+  await applyPlaylistFolderCover(playlistPath, job)
+
+  await fsp.rm(jobStaging, { recursive: true, force: true }).catch(() => null)
+
+  progressState.finalizeProgress = 1
+  applyProgress(job, progressState, {
+    message: 'Finalizing import',
+    currentTrack: null,
+  })
+  updateJob(job.id, {
+    status: 'done',
+    progress: 100,
+    message: playlistDoneMessage(job, importedPaths.length, failedTracksSuffix(job.stats.failedTracks, job.lastTrackError)),
+    finalDir: path.dirname(playlistPath),
+  })
+  invalidateLibraryCache()
+  await appendHistory(job)
+  await creditImportedFiles(importedPaths)
+  afterLibraryChange(job)
+}
+
+async function collectAlbumStagingDirs(root) {
+  const out = []
+  const artistEntries = await fsp.readdir(root, { withFileTypes: true }).catch(() => [])
+  for (const artist of artistEntries) {
+    if (!artist.isDirectory()) continue
+    const artistPath = path.join(root, artist.name)
+    const albumEntries = await fsp.readdir(artistPath, { withFileTypes: true }).catch(() => [])
+    for (const album of albumEntries) {
+      if (album.isDirectory()) {
+        out.push(path.join(artistPath, album.name))
+      }
+    }
+  }
+  return out
+}
+
+function handleAmdpLine(job, line, which, progressState) {
+  let matchedTrackHeader = false
+
+  const trackHeader = line.match(/^Track\s+(\d+)\s+of\s+(\d+)\s*:?\s*(.*)$/i)
+  if (trackHeader) {
+    const current = Number(trackHeader[1])
+    const total = Number(trackHeader[2])
+    if (total > 0) {
+      matchedTrackHeader = true
+      if (!progressState.lockDownloadTotal) {
+        progressState.downloadTotal = total
+      }
+      const inferredDone = Math.max(0, Math.min(total, current - 1))
+      if (!progressState.lockDownloadTotal && inferredDone > progressState.downloadDone) {
+        progressState.downloadDone = inferredDone
+      }
+      progressState.downloadPartial = 0
+      if (
+        progressState.convertEnabled &&
+        progressState.convertDone === 0 &&
+        !progressState.lockDownloadTotal
+      ) {
+        progressState.convertTotal = total
+      }
+
+      job.stats.total = progressState.lockDownloadTotal ? progressState.downloadTotal : total
+      job.stats.done = progressState.lockDownloadTotal
+        ? Math.max(job.stats.done || 0, progressState.downloadDone)
+        : Math.max(job.stats.done || 0, inferredDone)
+
+      const title = String(trackHeader[3] || '').trim()
+      applyProgress(job, progressState, {
+        currentTrack:
+          title && !/^(songs|music-videos)$/i.test(title)
+            ? title
+            : job.currentTrack,
+      })
+    }
+  }
+
+  if (!matchedTrackHeader) {
+    const bracketed = line.match(/\[(\d+)\/(\d+)\]/)
+    if (bracketed) {
+      const done = Number(bracketed[1])
+      const total = Number(bracketed[2])
+      if (total > 0) {
+        matchedTrackHeader = true
+        if (!progressState.lockDownloadTotal) {
+          progressState.downloadTotal = total
+          progressState.downloadDone = Math.max(
+            progressState.downloadDone,
+            Math.min(total, Math.max(0, done)),
+          )
+        }
+        progressState.downloadPartial = 0
+        if (
+          progressState.convertEnabled &&
+          progressState.convertDone === 0 &&
+          !progressState.lockDownloadTotal
+        ) {
+          progressState.convertTotal = total
+        }
+
+        job.stats.total = progressState.lockDownloadTotal ? progressState.downloadTotal : total
+        job.stats.done = progressState.lockDownloadTotal
+          ? Math.max(job.stats.done || 0, progressState.downloadDone)
+          : Math.max(job.stats.done || 0, Math.min(total, done))
+
+        applyProgress(job, progressState, {
+          currentTrack: extractBracketTitle(line),
+        })
+      }
+    }
+  }
+
+  if (!matchedTrackHeader) {
+    const downloading = line.match(
+      /Downloading\s+(\d+)\s*\/\s*(\d+)\s*:\s*(.+)$/i,
+    )
+    if (downloading) {
+      const current = Number(downloading[1])
+      const total = Number(downloading[2])
+      if (total > 0) {
+        matchedTrackHeader = true
+        if (!progressState.lockDownloadTotal) {
+          progressState.downloadTotal = total
+        }
+        const inferredDone = Math.max(0, Math.min(total, current - 1))
+        if (!progressState.lockDownloadTotal && inferredDone > progressState.downloadDone) {
+          progressState.downloadDone = inferredDone
+          progressState.downloadPartial = 0
+        }
+        if (
+          progressState.convertEnabled &&
+          progressState.convertDone === 0 &&
+          !progressState.lockDownloadTotal
+        ) {
+          progressState.convertTotal = total
+        }
+
+        job.stats.total = progressState.lockDownloadTotal ? progressState.downloadTotal : total
+        job.stats.done = progressState.lockDownloadTotal
+          ? Math.max(job.stats.done || 0, progressState.downloadDone)
+          : Math.max(job.stats.done || 0, inferredDone)
+
+        applyProgress(job, progressState, {
+          currentTrack: String(downloading[3] || '').trim() || job.currentTrack,
+        })
+      }
+    }
+  }
+
+  if (!matchedTrackHeader) {
+    const pctMatch = line.match(/(\d{1,3})\s*%/)
+    if (pctMatch) {
+      const pct = Math.max(0, Math.min(100, Number(pctMatch[1])))
+      if (progressState.downloadDone < progressState.downloadTotal) {
+        const partial = pct / 100
+        if (partial > progressState.downloadPartial) {
+          progressState.downloadPartial = partial
+          applyProgress(job, progressState)
+        }
+      }
+    }
+  }
+
+  if (which === 'stderr' && /error|failed|forbidden/i.test(line)) {
+    job.stats.failed = (job.stats.failed || 0) + 1
+  }
+
+  const event = { id: job.id, line, which }
+  if (isProgressOnlyLine(line)) {
+    const now = Date.now()
+    if (now - (lastProgressLogAt.get(job.id) || 0) < PROGRESS_LOG_MIN_INTERVAL_MS) {
+      pendingProgressLog.set(job.id, event)
+      return
+    }
+    pendingProgressLog.delete(job.id)
+    lastProgressLogAt.set(job.id, now)
+  } else {
+    // a real line ends the current bar; the next bar's first frame shows
+    flushProgressLog(job.id)
+    lastProgressLogAt.delete(job.id)
+  }
+  emitEvent('job.log', event)
+}
+
+function isProgressOnlyLine(line) {
+  return /\d{1,3}(\.\d+)?\s*%/.test(line) && !/error|fail|forbidden/i.test(line)
+}
+
+function extractBracketTitle(line) {
+  const m = line.match(/\]\s*(.+?)(?:\s*\[|$)/)
+  return m ? m[1].trim() : null
+}
+
+function buildAmdpArgs({ isSong, quality, url }) {
+  const args = []
+  if (isSong) args.push('--song')
+  if (quality === 'atmos') args.push('--atmos')
+  else if (quality === 'aac') args.push('--aac')
+  args.push(url)
+  return args
+}
+
+async function runAmdpDownload({ job, jobStaging, url, quality, isSong, progressState }) {
+  throwIfCancelled(job)
+  const ctl = new AbortController()
+  state.running.set(job.id, ctl)
+
+  applyProgress(job, progressState, {
+    message: quality === 'atmos'
+      ? 'Downloading Dolby Atmos from Apple Music'
+      : 'Downloading from Apple Music',
+  })
+
+  let lastLineAt = Date.now()
+  let lastLine = ''
+  let firstLineSeen = false
+  const startedAt = Date.now()
+  let warnFired = false
+  let stallReason = null
+  let fatalErrorCount = 0
+  let fatalAbortReason = null
+  const watchdog = setInterval(() => {
+    if (stallReason) return
+    const idleMs = Date.now() - lastLineAt
+    if (!firstLineSeen && Date.now() - startedAt >= FIRST_LINE_TIMEOUT_MS) {
+      stallReason = `wrapper produced no output within ${Math.round(FIRST_LINE_TIMEOUT_MS / 1000)}s`
+      emitEvent('wrapper.stall.suspected', {
+        jobId: job.id,
+        albumTitle: job.albumTitle,
+        currentTrack: job.currentTrack || null,
+        idleMs,
+        thresholdMs: FIRST_LINE_TIMEOUT_MS,
+        lastLine,
+        phase: 'aborting',
+      })
+      try {
+        ctl.abort()
+      } catch {
+        /* ignore */
+      }
+      return
+    }
+    if (idleMs >= STALL_TIMEOUT_MS) {
+      stallReason = `wrapper stalled (no output for ${Math.round(idleMs / 1000)}s)`
+      emitEvent('wrapper.stall.suspected', {
+        jobId: job.id,
+        albumTitle: job.albumTitle,
+        currentTrack: job.currentTrack || null,
+        idleMs,
+        thresholdMs: STALL_TIMEOUT_MS,
+        lastLine,
+        phase: 'aborting',
+      })
+      try {
+        ctl.abort()
+      } catch {
+        /* ignore */
+      }
+      return
+    }
+    const errorLines = job.stats.failed || 0
+    if (errorLines >= MAX_DOWNLOAD_ERRORS * 10 && !stallReason && !fatalAbortReason) {
+      fatalAbortReason = `download produced ${errorLines} error lines — likely stuck in a retry loop`
+      try {
+        ctl.abort()
+      } catch {
+      }
+      return
+    }
+    if (idleMs >= STALL_WARN_MS && !warnFired) {
+      warnFired = true
+      emitEvent('wrapper.stall.suspected', {
+        jobId: job.id,
+        albumTitle: job.albumTitle,
+        currentTrack: job.currentTrack || null,
+        idleMs,
+        thresholdMs: STALL_WARN_MS,
+        lastLine,
+        phase: 'warning',
+      })
+    } else if (idleMs < STALL_WARN_MS && warnFired) {
+      warnFired = false
+      // Output resumed, so the suspected stall is over.
+      emitEvent('wrapper.stall.cleared', { jobId: job.id })
+    }
+  }, STALL_TICK_MS)
+
+  try {
+    const { waitExit } = spawnAmdp({
+      args: buildAmdpArgs({ isSong, quality, url }),
+      cwd: jobStaging,
+      signal: ctl.signal,
+      onLine: ({ line, which }) => {
+        lastLineAt = Date.now()
+        lastLine = line
+        firstLineSeen = true
+        handleAmdpLine(job, line, which, progressState)
+        if (!fatalAbortReason && FATAL_DOWNLOAD_PATTERNS.some(re => re.test(line))) {
+          fatalErrorCount++
+          if (fatalErrorCount >= MAX_DOWNLOAD_ERRORS) {
+            fatalAbortReason = `download aborted after ${fatalErrorCount} fatal error(s): ${line.slice(0, 200)}`
+            try { ctl.abort() } catch {}
+          }
+        }
+      },
+    })
+    try {
+      const result = await waitExit
+      throwIfCancelled(job)
+      return result
+    } catch (err) {
+      if (job.cancelled) throw makeAbortError()
+      if (stallReason) {
+        const e = new Error(stallReason)
+        e.code = 'WRAPPER_STALL'
+        throw e
+      }
+      if (fatalAbortReason) {
+        const e = new Error(fatalAbortReason)
+        e.code = 'DOWNLOAD_FATAL'
+        throw e
+      }
+      throw err
+    }
+  } finally {
+    clearInterval(watchdog)
+    // A pass that ends while a stall warning stands (e.g. one track of a
+    // partial fill) ends that stall too.
+    if (warnFired && !stallReason) emitEvent('wrapper.stall.cleared', { jobId: job.id })
+    if (state.running.get(job.id) === ctl) {
+      state.running.delete(job.id)
+    }
+  }
+}
+
+// Returns null on a clean run, or { failed, reason } when amdp finished its
+// pass with some tracks downloaded and others failed (exit-on-error).
+function assertAmdpResult(result, combined) {
+  let partial = null
+  if (result.code !== 0) {
+    const summary = parseAmdpSummary(combined)
+    const reason = amdpFailureLine(combined)
+    if (!summary || summary.completed === 0 || summary.errors === 0) {
+      const detail =
+        reason ||
+        (summary?.errors ? `${summary.errors} of ${summary.total} track(s) failed to download` : null) ||
+        result.stderr.slice(-400).trim() ||
+        'no stderr'
+      throw new Error(`amdp exited ${result.code}: ${detail}`)
+    }
+    partial = { failed: summary.errors, reason }
+  }
+
+  if (/load Config failed/i.test(combined)) {
+    const line =
+      combined
+        .split(/\r?\n/)
+        .find((l) => /load Config failed/i.test(l)) || ''
+    throw new Error(`amdp config error: ${line.trim()}`)
+  }
+
+  const remuxError = detectAmdpRemuxError(combined)
+  if (remuxError) {
+    throw new Error(remuxError)
+  }
+  return partial
+}
+
+// amdp ends every pass with "Completed: 2/3 | Warnings: 0 | Errors: 1".
+function parseAmdpSummary(output) {
+  const matches = [
+    ...String(output || '').matchAll(/Completed:\s*(\d+)\s*\/\s*(\d+).*?Errors:\s*(\d+)/g),
+  ]
+  const m = matches.at(-1)
+  return m ? { completed: Number(m[1]), total: Number(m[2]), errors: Number(m[3]) } : null
+}
+
+function amdpFailureLine(output) {
+  const lines = String(output || '')
+    .split(/\r?\n|\r/)
+    .map((l) => stripAnsi(l).trim())
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // amdp logs this harmless line on every run
+    if (/decrypt secret: secret key not initialized/i.test(lines[i])) continue
+    if (/^(Failed to|Error:|Error while)/i.test(lines[i])) return lines[i].slice(0, 260)
+  }
+  return null
+}
+
+function playlistDoneMessage(job, importedCount, suffix = '') {
+  const reused = job.stats.reused || 0
+  const downloaded = importedCount - reused
+  const reusedPart = reused ? ` · ${reused} already in library` : ''
+  return `Imported ${downloaded} track${downloaded === 1 ? '' : 's'}${reusedPart}${suffix}`
+}
+
+function failedTracksSuffix(count, reason) {
+  if (!count) return ''
+  const detail = reason && !/track\(s\) failed to download$/.test(reason) ? ` (${reason})` : ''
+  return ` · ${count} failed${detail}`
+}
+
+// Per-track loops skip a track whose download failed instead of failing the
+// whole job; cancellation and a stalled wrapper still abort the job.
+function isSkippableTrackError(job, err) {
+  return !job.cancelled && err?.name !== 'AbortError' && err?.code !== 'WRAPPER_STALL'
+}
+
+function recordSkippedTrack(job, progressState, index, label, err) {
+  job.stats.failedTracks = (job.stats.failedTracks || 0) + 1
+  job.lastTrackError = err.message
+  console.error(`[job ${job.id}] skipping ${label}: ${err.message}`)
+  progressState.downloadDone = index + 1
+  progressState.downloadPartial = 0
+  applyProgress(job, progressState, { message: `Skipped ${label} (${err.message.slice(0, 160)})` })
+}
+
+async function shouldFallbackAtmosToFlac(result, combined, jobStaging) {
+  if (result.code !== 0) {
+    return isAtmosUnavailableOutput(combined)
+  }
+  const files = await collectAudioFiles(jobStaging)
+  return files.length === 0
+}
+
+function isAtmosUnavailableOutput(output) {
+  const lines = String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  return lines.some((line) =>
+    /atmos.*(not available|unavailable|not found|unsupported|missing|no stream|no variant)/i.test(line) ||
+    /(not available|unavailable|not found|unsupported|missing|no stream|no variant).*atmos/i.test(line) ||
+    /spatial.*(not available|unavailable|not found|unsupported|missing|no stream|no variant)/i.test(line) ||
+    /no (dolby )?atmos/i.test(line),
+  )
+}
+
+function detectAmdpRemuxError(output) {
+  if (!output) return null
+  const lines = String(output)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+
+  const patterns = [
+    /Embed failed:/i,
+    /exec:\s*"MP4Box":\s*executable file not found/i,
+    /MP4Box.*not found/i,
+    /MP4Box.*No such file/i,
+    /remux.*failed/i,
+  ]
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (patterns.some((re) => re.test(line))) {
+      return `amdp remux/embed failed: ${line.slice(0, 260)}`
+    }
+  }
+  return null
+}
+
+// Une playlist devient UN seul album : Mes Playlists/<Nom>/NN. Titre.flac
+// Chaque fichier recoit les tags ALBUM = nom de la playlist, ALBUMARTIST =
+// "Various Artists" et TRACKNUMBER = position dans la playlist, pour que
+// Navidrome (ou tout lecteur) l'affiche comme un seul album avec la pochette
+// de la playlist, au lieu d'un album par morceau.
+const PLAYLIST_ALBUM_ARTIST = 'Various Artists'
+
+function playlistFolderFor(job) {
+  return path.join(
+    MUSIC_ROOT,
+    PLAYLISTS_FOLDER,
+    sanitizeSegment(job.albumTitle || 'Playlist'),
+  )
+}
+
+// Apres un telechargement : un vrai telechargement (pas une ecoute octo-fiesta)
+// retire les doublons de Mes Decouvertes, puis Navidrome rescanne.
+function afterLibraryChange(job) {
+  const prune = job?.discovery
+    ? ensureDiscoveryFolder().catch(() => {})
+    : pruneDiscoveryDuplicates().catch((err) => console.error('[discovery] prune failed:', err.message))
+  prune.then(() => triggerNavidromeScan()).catch(console.error)
+}
+
+async function placeInPlaylist({ job, srcPath, position, convention, copy = false }) {
+  const destDir = playlistFolderFor(job)
+  await ensureDir(destDir)
+  const ext = path.extname(srcPath)
+  const baseName = path.basename(srcPath, ext)
+  const title = baseName.replace(/^\d+\.\s+/, '').trim() || 'Track'
+  let stem = `${String(position).padStart(2, '0')}. ${title}`
+  if (convention === 'qobuz') stem = applyNamingConvention(stem, 'qobuz')
+  const destPath = path.join(destDir, fitFileName(`${stem}${ext}`))
+
+  if (copy) {
+    await fsp.copyFile(srcPath, destPath)
+    for (const lyricsExt of ['.lrc', '.ttml']) {
+      await fsp
+        .copyFile(
+          path.join(path.dirname(srcPath), `${baseName}${lyricsExt}`),
+          path.join(destDir, `${stem}${lyricsExt}`),
+        )
+        .catch(() => {})
+    }
+  } else {
+    await moveFileSafe(srcPath, destPath)
+    await moveLyricsSidecars(srcPath, destPath)
+  }
+
+  // Tags d'album : seulement pour les FLAC (les .m4a gardent leurs tags).
+  // Les anciens alias sont vides pour ne pas laisser deux valeurs en conflit.
+  if (/\.flac$/i.test(destPath)) {
+    await writeFlacComments(destPath, {
+      ALBUM: [job.albumTitle || 'Playlist'],
+      ALBUMARTIST: [PLAYLIST_ALBUM_ARTIST],
+      ALBUM_ARTIST: [],
+      TRACKNUMBER: [String(position)],
+      TRACK: [],
+      TRACKTOTAL: [],
+      TOTALTRACKS: [],
+      DISCNUMBER: ['1'],
+      DISC: [],
+      DISCTOTAL: [],
+      TOTALDISCS: [],
+      COMPILATION: ['1'],
+    }).catch(() => false)
+  }
+  return destPath
+}
+
+// La pochette de la playlist (ecrite a cote du .m3u8) est aussi posee dans le
+// dossier de la playlist, sous le nom cover.*, pour que l'album prenne cette
+// pochette et pas celle d'un des morceaux.
+async function applyPlaylistFolderCover(playlistPath, job) {
+  const playlistsDir = path.dirname(playlistPath)
+  const base = path.basename(playlistPath, path.extname(playlistPath))
+  const destDir = playlistFolderFor(job)
+  for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
+    const cover = path.join(playlistsDir, `${base}${ext}`)
+    const has = await fsp
+      .stat(cover)
+      .then((st) => st.isFile())
+      .catch(() => false)
+    if (!has) continue
+    await ensureDir(destDir)
+    await fsp.copyFile(cover, path.join(destDir, `cover${ext}`)).catch(() => {})
+    // Une ancienne folder.jpg (pochette d'un morceau) ne doit pas passer devant.
+    await fsp.rm(path.join(destDir, 'folder.jpg'), { force: true }).catch(() => {})
+    return
+  }
+}
+
+async function importPlaylistTracks({ job, jobStaging, onProgress, position = null }) {
+  const settings = await readSettings().catch(() => null)
+  const convention = settings?.namingConvention || 'apple'
+  const candidates = await collectAudioFiles(jobStaging)
+  const imported = []
+
+  for (let i = 0; i < candidates.length; i++) {
+    const srcPath = candidates[i].path
+    // amdp numerote les fichiers d'une playlist selon leur position dans la
+    // playlist ; pour un morceau telecharge seul, la position est donnee.
+    const stagedNumber = Number.parseInt(
+      /^(\d+)\.\s/.exec(path.basename(srcPath))?.[1] ?? '',
+      10,
+    )
+    const pos =
+      position != null ? position + i : stagedNumber > 0 ? stagedNumber : i + 1
+
+    const destPath = await placeInPlaylist({ job, srcPath, position: pos, convention })
+    imported.push(destPath)
+    onProgress?.({ done: i + 1, total: candidates.length })
+  }
+
+  return imported
+}
+
+// amdp names playlist files by playlist position; use the album track number
+// so the file matches what an album download of the same release produces.
+function renumberFromTrackTag(fileName, track) {
+  const n = Number.parseInt(track, 10)
+  if (!(n > 0) || !/^\d+\.\s/.test(fileName)) return fileName
+  return fileName.replace(/^\d+/, String(n).padStart(2, '0'))
+}
+
+async function collectAudioFiles(root) {
+  const out = []
+  await walk(root)
+  out.sort((a, b) => (a.mtimeMs - b.mtimeMs) || a.path.localeCompare(b.path))
+  return out
+
+  async function walk(dir) {
+    const entries = await fsp.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(abs)
+      } else if (/\.(flac|m4a|mp3)$/i.test(entry.name)) {
+        const stat = await fsp.stat(abs).catch(() => null)
+        out.push({ path: abs, mtimeMs: stat?.mtimeMs || 0 })
+      }
+    }
+  }
+}
+
+function inferArtistAlbumFromPath(parts) {
+  if (parts.length >= 3) {
+    return {
+      artist: parts[0],
+      album: parts[1],
+    }
+  }
+  if (parts.length >= 2) {
+    return {
+      artist: parts[0],
+      album: null,
+    }
+  }
+  return { artist: null, album: null }
+}
+
+// amdp saves lyrics before decrypting, so a failed track leaves its .lrc behind.
+async function removeOrphanLyrics(dir) {
+  const files = await fsp.readdir(dir).catch(() => [])
+  const audioStems = new Set(
+    files.filter((f) => /\.(flac|m4a|mp3)$/i.test(f)).map((f) => path.parse(f).name),
+  )
+  for (const f of files) {
+    if (/\.(lrc|ttml)$/i.test(f) && !audioStems.has(path.parse(f).name)) {
+      await fsp.rm(path.join(dir, f), { force: true })
+    }
+  }
+}
+
+async function moveLyricsSidecars(srcAudioPath, destAudioPath) {
+  const srcBase = path.basename(srcAudioPath, path.extname(srcAudioPath))
+  const destBase = path.basename(destAudioPath, path.extname(destAudioPath))
+  const srcDir = path.dirname(srcAudioPath)
+  const destDir = path.dirname(destAudioPath)
+  for (const ext of ['.lrc', '.ttml']) {
+    const src = path.join(srcDir, `${srcBase}${ext}`)
+    const has = await fsp
+      .stat(src)
+      .then((s) => s.isFile())
+      .catch(() => false)
+    if (!has) continue
+    const dest = path.join(destDir, `${destBase}${ext}`)
+    await moveFileSafe(src, dest)
+  }
+}
+
+async function copyFolderArtIfAny(srcDir, destDir) {
+  const src = path.join(srcDir, 'folder.jpg')
+  const exists = await fsp
+    .stat(src)
+    .then((s) => s.isFile())
+    .catch(() => false)
+  if (!exists) return
+  const dest = path.join(destDir, 'folder.jpg')
+  const destExists = await fsp
+    .stat(dest)
+    .then((s) => s.isFile())
+    .catch(() => false)
+  if (destExists) return
+  await fsp.copyFile(src, dest).catch(() => {})
+}
+
+async function moveFileSafe(from, to) {
+  try {
+    await fsp.rename(from, to)
+  } catch (err) {
+    if (err.code === 'EXDEV') {
+      await fsp.copyFile(from, to)
+      await fsp.unlink(from).catch(() => {})
+    } else if (err.code === 'EEXIST') {
+      await fsp.rm(to).catch(() => {})
+      await fsp.rename(from, to)
+    } else {
+      throw err
+    }
+  }
+}

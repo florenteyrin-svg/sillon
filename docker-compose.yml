@@ -20,12 +20,12 @@ services:
       - ${SILLON_DATA_PATH:-./data/sillon}:/data
     ports:
       - "${SILLON_PORT:-4747}:4747"
-    networks: [sillon]
+    networks: [default]
 
-  # ---- à la carte (Apple Music downloads), built from its repository, unchanged ----
+  # ---- à la carte (Apple Music downloads): your own version, in the alacarte/ folder ----
   alacarte-wrapper:
     build:
-      context: https://github.com/norifm/alacarte.git#main:wrapper
+      context: ./alacarte/wrapper
     image: alacarte-wrapper:local
     pull_policy: build
     container_name: alacarte-wrapper
@@ -45,12 +45,12 @@ services:
       - /dev/random:/app/rootfs/dev/random
       - /dev/zero:/app/rootfs/dev/zero
     expose: ["10020", "20020", "30020", "40020"]
-    networks: [sillon]
+    networks: [default]
     restart: on-failure
 
   alacarte-web:
     build:
-      context: https://github.com/norifm/alacarte.git#main
+      context: ./alacarte
       dockerfile: backend/Dockerfile
     image: alacarte-web:local
     pull_policy: build
@@ -70,6 +70,9 @@ services:
       - AMDL_SECRET_KEY=${AMDL_SECRET_KEY:-}
       - AUTH_DISABLED=false
       - TRUST_PROXY=loopback
+      - AMDL_DISCOVERY_DAYS=${AMDL_DISCOVERY_DAYS:-30}
+      - AMDL_ANIMATED_ARTWORK=${AMDL_ANIMATED_ARTWORK:-1}
+      - AMDL_CLIPS_FOLDER=${AMDL_CLIPS_FOLDER:-Mes Clips}
       - PUID=${PUID:-}
       - PGID=${PGID:-}
     volumes:
@@ -79,9 +82,28 @@ services:
     # Its own page, for the Apple sign-in and its settings: home network only, no domain needed.
     ports:
       - "${ALACARTE_PORT:-7373}:7373"
-    networks: [sillon]
+    networks: [default]
     restart: unless-stopped
 
+# By default a network of its own. To share an existing one (e.g. reseau-media, with Allstarr/Jellyfin),
+# set DOCKER_NETWORK=reseau-media and DOCKER_NETWORK_EXTERNAL=true in .env.
 networks:
-  sillon:
-    name: sillon
+  default:
+    name: ${DOCKER_NETWORK:-sillon}
+    external: ${DOCKER_NETWORK_EXTERNAL:-false}
+
+# Shows Sillon on the ZimaOS / CasaOS dashboard
+x-casaos:
+  author: self
+  category: self
+  hostname: ""
+  icon: https://raw.githubusercontent.com/florenteyrin-svg/sillon/main/assets/icon.png
+  index: /
+  is_uncontrolled: false
+  main: sillon
+  port_map: "4747"
+  scheme: http
+  store_app_id: sillon
+  title:
+    custom: Sillon
+    en_us: Sillon

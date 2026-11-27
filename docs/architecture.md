@@ -12,11 +12,15 @@
                      /music  ◀───────────── même dossier ─────────┘
 ```
 
+À la carte (dossier `alacarte/`) est la version personnalisée décrite dans `alacarte/MES_MODIFS.md`.
+Les fichiers du module Apple (`wrapper/rootfs/system`, ~116 Mo, inchangés) ne sont pas copiés ici :
+le Dockerfile du wrapper les récupère dans le dépôt d'origine à un commit fixe.
+
 ## Serveur (`server/`)
 
 | Paquet | Rôle |
 |---|---|
-| `scanner` | Parcourt `/music`, lit les tags et la qualité (FLAC en natif, le reste via ffprobe), suit les changements avec inotify. Un fichier doit rester 2 s sans changer avant d'être lu, pour ne pas lire un téléchargement à moitié écrit. Un scan complet tourne au démarrage puis toutes les 6 h (`SILLON_RESCAN_HOURS`) par sécurité ; seuls les fichiers modifiés sont relus. |
+| `scanner` | Ignore les dossiers contenant un fichier `.ignore` (et les dossiers cachés). Parcourt `/music`, lit les tags et la qualité (FLAC en natif, le reste via ffprobe), suit les changements avec inotify. Un fichier doit rester 2 s sans changer avant d'être lu, pour ne pas lire un téléchargement à moitié écrit. Un scan complet tourne au démarrage puis toutes les 6 h (`SILLON_RESCAN_HOURS`) par sécurité ; seuls les fichiers modifiés sont relus. |
 | `db` | SQLite (WAL) : titres, albums, artistes, comptes, playlists, favoris, écoutes, file d'attente. |
 | `subsonic` | API Subsonic 1.16.1 + extensions OpenSubsonic (`apiKeyAuthentication`, `songLyrics`, `formPost`). Paroles lues depuis les `.lrc` posés par à la carte. |
 | `api` | API propre aux applis Sillon (ci-dessous). |
@@ -31,7 +35,8 @@ Stables et préfixés : `tr-` titre (chemin du fichier), `al-` album (artiste de
 
 ### Champs ajoutés aux réponses Subsonic
 
-- `quality` sur les titres et albums : `hires`, `cd` ou `lossy` (le logo à afficher).
+- `quality` sur les titres et albums : `hires`, `cd`, `atmos` ou `lossy` (le logo à afficher).
+  La version Dolby Atmos d'un album reste un album séparé.
 - `smart` sur les playlists.
 
 ## API Sillon (`/api`)

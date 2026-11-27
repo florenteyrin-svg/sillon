@@ -36,7 +36,7 @@ func (s *Scanner) Watch(stop <-chan struct{}) error {
 				return nil
 			}
 			name := ev.Name
-			if strings.HasPrefix(filepath.Base(name), ".") {
+			if base := filepath.Base(name); strings.HasPrefix(base, ".") && base != IgnoreFile {
 				continue
 			}
 			if ev.Has(fsnotify.Create) {
@@ -78,7 +78,7 @@ func (s *Scanner) addTree(w *fsnotify.Watcher, dir string) int {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
-		if p != s.root && strings.HasPrefix(d.Name(), ".") {
+		if p != s.root && (strings.HasPrefix(d.Name(), ".") || hasIgnoreFile(p)) {
 			return filepath.SkipDir
 		}
 		if err := w.Add(p); err != nil {

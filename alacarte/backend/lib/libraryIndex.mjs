@@ -1,0 +1,955 @@
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+
+import { normalizeIsrc, normalizeUpc, readAudioIdentityTags } from './audioTags.mjs'
+import { getDb, getMeta, setMeta } from './db.mjs'
+import { groupOf, parseVariantSuffix } from './qualityGroups.mjs'
+import { DISCOVERY_FOLDER, PLAYLISTS_FOLDER, readVersionMarker } from './folderLayout.mjs'
+import {
+  isAlbumKeyVariantMatch,
+  makeAlbumMatchKey,
+  makeSongMatchKey,
+  normalizeForMatchKey,
+  sanitizeSegment,
+  stripTrailingYear,
+} from './libraryMatchKey.mjs'
+
+export { stripTrailingYear }
+
+
+const AUDIO_RE = /\.(flac|m4a|mp3)$/i
+
+const SCAN_TTL_MS = 30_000
+// Even with incremental tracking, walk everything periodically so external
+// edits (re-tagged files, mtime-preserving moves) are eventually picked up.
+// Bump when readAudioIdentityTags learns a new format, so cached rows are
+// re-read by one full scan instead of waiting for files to change.
+const IDENTITY_TAGS_VERSION = '2'
+const FULL_RESCAN_MS =
+  Math.max(1, Number(process.env.AMDL_FULL_RESCAN_HOURS) || 24) *
+  60 *
+  60 *
+  1000
+
+let _scanCache = null
+let _scanCacheAt = 0
+
+export function getMusicRoot() {
+  return process.env.AMDL_MUSIC_PATH || '/music'
+}
+
+async function getCachedIndex() {
+  const now = Date.now()
+  if (_scanCache && now - _scanCacheAt < SCAN_TTL_MS) return _scanCache
+  _scanCache = await scanLibrary()
+  _scanCacheAt = now
+  return _scanCache
+}
+
+export function invalidateLibraryCache() {
+  _scanCache = null
+  _scanCacheAt = 0
+  _discoveryCache = null
+  _discoveryCacheAt = 0
+}
+
+export async function scanLibraryOnce() {
+  return getCachedIndex()
+}
+
+function tryGetDb() {
+  try {
+    return getDb()
+  } catch (err) {
+    console.error('sqlite unavailable, library scans stay ephemeral:', err.message)
+    return null
+  }
+}
+
+export async function scanLibrary() {
+  const db = tryGetDb()
+  if (!db) return walkLibrary('ephemeral')
+  const lastFull = Number(getMeta('library_last_full_scan') || 0)
+  const staleTags = getMeta('identity_tags_version') !== IDENTITY_TAGS_VERSION
+  const mode = staleTags || Date.now() - lastFull > FULL_RESCAN_MS ? 'full' : 'incremental'
+  const result = await walkLibrary(mode)
+  if (mode === 'full') {
+    setMeta('library_last_full_scan', String(Date.now()))
+    setMeta('identity_tags_version', IDENTITY_TAGS_VERSION)
+  }
+  return result
+}
+
+function emptyIndex() {
+  return {
+    albums: [],
+    singles: [],
+    albumKeys: new Set(),
+    songKeys: new Set(),
+    albumTrackKeys: new Map(),
+    singlesSongKeys: new Set(),
+    playlistIds: new Set(),
+    playlists: [],
+    isrcs: new Set(),
+    upcs: new Set(),
+    songPaths: new Map(),
+    songCandidates: new Map(),
+    isrcPaths: new Map(),
+    songVersionPaths: new Map(),
+    albumVersionGroups: new Map(),
+  }
+}
+
+function statSafe(p) {
+  return fsp.stat(p).catch(() => null)
+}
+
+function addedAtFromStat(st) {
+  return Math.round(st?.mtimeMs || st?.ctimeMs || st?.birthtimeMs || 0)
+}
+
+// Walks the music library and aggregates the index. Modes:
+//  - 'ephemeral': no DB, everything read fresh (legacy behavior)
+//  - 'full':      read everything fresh and (re)write the SQLite cache
+//  - 'incremental': skip directories whose mtime is unchanged in the cache,
+//                   reuse file rows unless mtime/size changed; tags are only
+//                   read for new or changed files, keeping tag I/O bounded
+async function walkLibrary(mode) {
+  const acc = emptyIndex()
+  const db = mode === 'ephemeral' ? null : getDb()
+  const useCache = mode === 'incremental'
+  const persist = mode !== 'ephemeral'
+  const ctx = { db, mode, useCache, persist }
+
+  if (mode === 'full') {
+    db.exec('DELETE FROM library_files')
+    db.exec('DELETE FROM library_dirs')
+  }
+
+  await scanPlaylistsDir(ctx, acc)
+
+  const seenArtistDirs = new Set()
+  const artistEntries = await readDirSafe(getMusicRoot())
+  for (const artistEntry of artistEntries) {
+    if (!artistEntry.isDirectory()) continue
+    if (artistEntry.name.startsWith('.')) continue
+    if (artistEntry.name === 'Playlists' || artistEntry.name === PLAYLISTS_FOLDER) continue
+    // Mes Decouvertes reste hors de la bibliotheque : un vrai telechargement
+    // depuis alacarte ne doit pas etre bloque par ce qui a juste ete ecoute.
+    if (artistEntry.name === DISCOVERY_FOLDER) continue
+
+    const artistName = artistEntry.name
+    const artistPath = path.join(getMusicRoot(), artistName)
+    seenArtistDirs.add(artistPath)
+    const artistStat = await statSafe(artistPath)
+    const cachedArtist = useCache ? getDirRow(db, artistPath) : null
+
+    if (
+      cachedArtist &&
+      artistStat &&
+      Math.round(artistStat.mtimeMs) === cachedArtist.mtime
+    ) {
+      // Artist dir untouched: revisit its album/singles dirs only if their
+      // own mtime moved (contents can change without touching the parent).
+      for (const child of getDirRowsByParent(db, artistPath)) {
+        const childStat = await statSafe(child.path)
+        if (
+          childStat?.isDirectory() &&
+          Math.round(childStat.mtimeMs) === child.mtime
+        ) {
+          aggregateAudioDirFromRows(
+            listFileRowsByParent(db, child.path),
+            child.kind,
+            artistName,
+            child.path,
+            child.mtime,
+            acc,
+          )
+        } else {
+          await scanAudioDir(child.path, child.kind, artistName, ctx, acc)
+        }
+      }
+      continue
+    }
+
+    const children = await readDirSafe(artistPath)
+    const seenChildPaths = new Set()
+    for (const child of children) {
+      if (!child.isDirectory()) continue
+      if (child.name.startsWith('.')) continue
+      const childPath = path.join(artistPath, child.name)
+      const kind = child.name.toLowerCase() === 'singles' ? 'singles' : 'album'
+      seenChildPaths.add(childPath)
+      await scanAudioDir(childPath, kind, artistName, ctx, acc)
+    }
+    if (persist) {
+      deleteDirRowsNotIn(db, artistPath, seenChildPaths)
+      upsertDirRow(db, artistPath, artistStat, 'artist', getMusicRoot())
+    }
+  }
+
+  if (persist) {
+    cleanupVanishedArtists(db, seenArtistDirs)
+    // Invariant sweep: every audio row must belong to a tracked directory.
+    db.exec(
+      `DELETE FROM library_files WHERE kind IN ('album','single')
+       AND parent NOT IN (SELECT path FROM library_dirs)`,
+    )
+  }
+
+  acc.albums.sort((a, b) =>
+    `${a.artistName}\u0000${a.albumName}`.localeCompare(
+      `${b.artistName}\u0000${b.albumName}`,
+    ),
+  )
+  acc.singles.sort((a, b) =>
+    `${a.artistName}\u0000${a.songName}`.localeCompare(
+      `${b.artistName}\u0000${b.songName}`,
+    ),
+  )
+  acc.playlists.sort((a, b) =>
+    `${a.playlistName}\u0000${a.relPath}`.localeCompare(
+      `${b.playlistName}\u0000${b.relPath}`,
+      undefined,
+      { sensitivity: 'base' },
+    ),
+  )
+  return acc
+}
+
+async function scanPlaylistsDir(ctx, acc) {
+  const playlistsDir = path.join(getMusicRoot(), PLAYLISTS_FOLDER)
+  const dirStat = await statSafe(playlistsDir)
+  if (!dirStat?.isDirectory()) return
+
+  const cachedDir = ctx.useCache ? getDirRow(ctx.db, playlistsDir) : null
+  if (cachedDir && Math.round(dirStat.mtimeMs) === cachedDir.mtime) {
+    for (const row of listFileRowsByParent(ctx.db, playlistsDir)) {
+      aggregatePlaylistRow(row, acc)
+    }
+    return
+  }
+
+  const entries = await readDirSafe(playlistsDir)
+  const existingRows = ctx.useCache
+    ? getFileRowsByParent(ctx.db, playlistsDir)
+    : new Map()
+  const seen = new Set()
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.m3u8$/i.test(entry.name)) continue
+    const absPath = path.join(playlistsDir, entry.name)
+    const st = await statSafe(absPath)
+    if (!st) continue
+    seen.add(absPath)
+    const mtime = Math.round(st.mtimeMs)
+    const size = Number(st.size)
+    let row = existingRows.get(absPath)
+    if (!row || row.mtime !== mtime || row.size !== size) {
+      const meta = await readPlaylistM3uFileMeta(absPath)
+      row = makeFileRow({
+        path: absPath,
+        parent: playlistsDir,
+        mtime,
+        size,
+        kind: 'playlist',
+        meta: { ...meta, addedAt: addedAtFromStat(st) },
+      })
+      if (ctx.persist) upsertFileRow(ctx.db, row)
+    }
+    aggregatePlaylistRow(row, acc)
+  }
+  if (ctx.persist) {
+    deleteFileRowsNotIn(ctx.db, playlistsDir, seen)
+    upsertDirRow(ctx.db, playlistsDir, dirStat, 'playlists', getMusicRoot())
+  }
+}
+
+async function readDirGroup(dirPath) {
+  const marker = await readVersionMarker(dirPath)
+  if (marker) return groupOf(marker)
+  return parseVariantSuffix(path.basename(dirPath))
+}
+
+async function scanAudioDir(dirPath, kind, artistName, ctx, acc) {
+  const dirStat = await statSafe(dirPath)
+  if (!dirStat?.isDirectory()) return
+
+  const dirGroup = kind === 'album' ? await readDirGroup(dirPath) : null
+  const dirHasFlac = kind === 'album'
+  const cachedDir = ctx.useCache ? getDirRow(ctx.db, dirPath) : null
+  if (cachedDir && Math.round(dirStat.mtimeMs) === cachedDir.mtime) {
+    aggregateAudioDirFromRows(
+      listFileRowsByParent(ctx.db, dirPath),
+      kind,
+      artistName,
+      dirPath,
+      cachedDir.mtime,
+      acc,
+      dirGroup,
+      dirHasFlac,
+    )
+    return
+  }
+
+  const entries = await readDirSafe(dirPath)
+  const existingRows = ctx.useCache
+    ? getFileRowsByParent(ctx.db, dirPath)
+    : new Map()
+  const seen = new Set()
+  const rows = []
+  for (const file of entries) {
+    if (!file.isFile() || !AUDIO_RE.test(file.name)) continue
+    const audioPath = path.join(dirPath, file.name)
+    const st = await statSafe(audioPath)
+    if (!st) continue
+    seen.add(audioPath)
+    const mtime = Math.round(st.mtimeMs)
+    const size = Number(st.size)
+    let row = existingRows.get(audioPath)
+    if (!row || row.mtime !== mtime || row.size !== size) {
+      const songName =
+        kind === 'album'
+          ? songNameFromFilename(file.name)
+          : path.basename(file.name, path.extname(file.name))
+      const albumName = kind === 'album' ? path.basename(dirPath) : null
+      const songKey = songName ? makeSongKey(artistName, songName) : ''
+      const albumKey =
+        kind === 'album' ? makeAlbumKey(artistName, albumName) : ''
+      const hasLyrics = await hasSiblingLrc(audioPath)
+      let tags = {}
+      try {
+        tags = await readAudioIdentityTags(audioPath)
+      } catch {}
+      row = makeFileRow({
+        path: audioPath,
+        parent: dirPath,
+        mtime,
+        size,
+        kind,
+        artistName,
+        albumName,
+        songName,
+        songKey,
+        albumKey,
+        isrc: tags.isrc || null,
+        upc: tags.upc || null,
+        meta: dirGroup ? { hasLyrics, version: dirGroup } : { hasLyrics },
+      })
+      if (ctx.persist) upsertFileRow(ctx.db, row)
+    }
+    rows.push(row)
+  }
+  aggregateAudioDirFromRows(rows, kind, artistName, dirPath, addedAtFromStat(dirStat), acc, dirGroup, dirHasFlac)
+  if (ctx.persist) {
+    deleteFileRowsNotIn(ctx.db, dirPath, seen)
+    upsertDirRow(ctx.db, dirPath, dirStat, kind, path.dirname(dirPath))
+  }
+}
+
+function makeFileRow({
+  path: rowPath,
+  parent,
+  mtime,
+  size,
+  kind,
+  artistName = null,
+  albumName = null,
+  songName = null,
+  songKey = null,
+  albumKey = null,
+  isrc = null,
+  upc = null,
+  meta = {},
+}) {
+  return {
+    path: rowPath,
+    parent,
+    mtime,
+    size,
+    kind,
+    artist_name: artistName,
+    album_name: albumName,
+    song_name: songName,
+    song_key: songKey || null,
+    album_key: albumKey || null,
+    isrc: isrc ? normalizeIsrc(isrc) : null,
+    upc: upc ? normalizeUpc(upc) : null,
+    meta: JSON.stringify(meta || {}),
+  }
+}
+
+function parseFileRow(row) {
+  let meta = {}
+  try {
+    meta = JSON.parse(row.meta || '{}')
+  } catch {}
+  return { ...row, metaParsed: meta }
+}
+
+function aggregateAudioDirFromRows(rawRows, kind, artistName, dirPath, dirAddedAt, acc, dirGroup = null, dirHasFlac = false) {
+    let versionGroup = dirGroup || null
+  const rows = rawRows.map(parseFileRow)
+  if (rows.length === 0) return
+  const rel = toRel(dirPath)
+
+  if (kind === 'album') {
+    const albumName = rows[0].album_name || path.basename(dirPath)
+    let lyricsCount = 0
+    const trackSet = new Set()
+    for (const row of rows) {
+      if (row.metaParsed.hasLyrics) lyricsCount += 1
+      if (row.song_key) trackSet.add(row.song_key)
+    }
+    acc.albums.push({
+      id: rel,
+      artistName,
+      albumName,
+      relPath: rel,
+      trackCount: rows.length,
+      lyricsCount,
+      hasLyrics: lyricsCount > 0,
+      addedAt: dirAddedAt,
+    })
+    const albumKey = makeAlbumKey(artistName, albumName)
+    if (albumKey) {
+      acc.albumKeys.add(albumKey)
+      acc.albumTrackKeys.set(albumKey, trackSet)
+    }
+    versionGroup = dirGroup || (rows.some((r) => /\.flac$/i.test(r.path)) ? 'lossless' : null)
+    if (versionGroup) {
+      const baseAlbumName = albumName.replace(/\s*\((FLAC|ALAC|Atmos|AAC)\)$/i, '')
+      const baseKey = makeAlbumKey(artistName, baseAlbumName)
+      if (baseKey) {
+        if (!acc.albumVersionGroups.has(baseKey)) acc.albumVersionGroups.set(baseKey, new Set())
+        acc.albumVersionGroups.get(baseKey).add(versionGroup)
+      }
+    }
+  } else {
+    for (const row of rows) {
+      acc.singles.push({
+        id: toRel(row.path),
+        artistName,
+        songName: row.song_name || '',
+        relPath: toRel(row.path),
+        hasLyrics: Boolean(row.metaParsed.hasLyrics),
+        addedAt: row.mtime,
+      })
+      if (row.song_key) acc.singlesSongKeys.add(row.song_key)
+    }
+  }
+
+  for (const row of rows) {
+    if (row.song_key) {
+      acc.songKeys.add(row.song_key)
+      let candidates = acc.songCandidates.get(row.song_key)
+      if (!candidates) acc.songCandidates.set(row.song_key, (candidates = []))
+      candidates.push({
+        rel: toRel(row.path),
+        isrc: row.isrc || '',
+        album: row.album_name ? albumMatchName(row.album_name) : null,
+      })
+      if (!acc.songPaths.has(row.song_key)) {
+        acc.songPaths.set(row.song_key, toRel(row.path))
+      }
+    }
+    if (row.song_key && !acc.songVersionPaths.has(row.song_key)) {
+      acc.songVersionPaths.set(row.song_key, [])
+    }
+    if (row.song_key) {
+      const rel = toRel(row.path)
+      const versions = acc.songVersionPaths.get(row.song_key)
+      if (!versions.some((v) => v.rel === rel)) {
+        versions.push({ rel, group: versionGroup || 'primary' })
+      }
+    }
+    if (row.isrc) {
+      acc.isrcs.add(row.isrc)
+      if (!acc.isrcPaths.has(row.isrc)) acc.isrcPaths.set(row.isrc, toRel(row.path))
+    }
+    if (row.upc) acc.upcs.add(row.upc)
+  }
+}
+
+function aggregatePlaylistRow(rawRow, acc) {
+  const row = parseFileRow(rawRow)
+  const meta = row.metaParsed
+  if (meta.catalogPlaylistId) acc.playlistIds.add(meta.catalogPlaylistId)
+  if (meta.libraryPlaylistId) acc.playlistIds.add(meta.libraryPlaylistId)
+  const fileName = path.basename(row.path)
+  const relPath = toRel(row.path)
+  acc.playlists.push({
+    id: relPath,
+    relPath,
+    fileName,
+    playlistName:
+      meta.playlistTitle ||
+      path.basename(fileName, path.extname(fileName)) ||
+      fileName,
+    catalogPlaylistId: meta.catalogPlaylistId || null,
+    libraryPlaylistId: meta.libraryPlaylistId || null,
+    trackCount: Number(meta.trackCount || 0),
+    addedAt: Number(meta.addedAt || row.mtime),
+  })
+}
+
+const stmtCache = new WeakMap()
+
+function stmt(db, sql) {
+  let cache = stmtCache.get(db)
+  if (!cache) {
+    cache = new Map()
+    stmtCache.set(db, cache)
+  }
+  let prepared = cache.get(sql)
+  if (!prepared) {
+    prepared = db.prepare(sql)
+    cache.set(sql, prepared)
+  }
+  return prepared
+}
+
+function upsertDirRow(db, dirPath, stat, kind, parent) {
+  stmt(
+    db,
+    `INSERT INTO library_dirs (path, mtime, kind, parent) VALUES (?, ?, ?, ?)
+     ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, kind = excluded.kind, parent = excluded.parent`,
+  ).run(dirPath, Math.round(stat?.mtimeMs || 0), kind, parent)
+}
+
+function getDirRow(db, dirPath) {
+  return stmt(db, 'SELECT path, mtime, kind, parent FROM library_dirs WHERE path = ?').get(dirPath) || null
+}
+
+function getDirRowsByParent(db, parent) {
+  return stmt(db, 'SELECT path, mtime, kind, parent FROM library_dirs WHERE parent = ?').all(parent)
+}
+
+function deleteDirRowsNotIn(db, parent, seenPaths) {
+  const existing = getDirRowsByParent(db, parent)
+  for (const row of existing) {
+    if (seenPaths.has(row.path)) continue
+    stmt(db, 'DELETE FROM library_files WHERE parent = ?').run(row.path)
+    stmt(db, 'DELETE FROM library_dirs WHERE path = ?').run(row.path)
+  }
+}
+
+function cleanupVanishedArtists(db, seenArtistDirs) {
+  const rows = stmt(db, "SELECT path FROM library_dirs WHERE kind = 'artist'").all()
+  for (const row of rows) {
+    if (seenArtistDirs.has(row.path)) continue
+    const childDirs = getDirRowsByParent(db, row.path).map((c) => c.path)
+    for (const child of childDirs) {
+      stmt(db, 'DELETE FROM library_files WHERE parent = ?').run(child)
+    }
+    stmt(db, 'DELETE FROM library_files WHERE parent = ?').run(row.path)
+    stmt(db, 'DELETE FROM library_dirs WHERE parent = ?').run(row.path)
+    stmt(db, 'DELETE FROM library_dirs WHERE path = ?').run(row.path)
+  }
+}
+
+function upsertFileRow(db, row) {
+  stmt(
+    db,
+    `INSERT INTO library_files
+       (path, parent, mtime, size, kind, artist_name, album_name, song_name, song_key, album_key, isrc, upc, meta)
+     VALUES (@path, @parent, @mtime, @size, @kind, @artist_name, @album_name, @song_name, @song_key, @album_key, @isrc, @upc, @meta)
+     ON CONFLICT(path) DO UPDATE SET
+       parent = excluded.parent,
+       mtime = excluded.mtime,
+       size = excluded.size,
+       kind = excluded.kind,
+       artist_name = excluded.artist_name,
+       album_name = excluded.album_name,
+       song_name = excluded.song_name,
+       song_key = excluded.song_key,
+       album_key = excluded.album_key,
+       isrc = excluded.isrc,
+       upc = excluded.upc,
+       meta = excluded.meta`,
+  ).run(row)
+}
+
+function getFileRowsByParent(db, parent) {
+  const rows = stmt(db, 'SELECT * FROM library_files WHERE parent = ?').all(parent)
+  const byPath = new Map()
+  for (const row of rows) byPath.set(row.path, row)
+  return byPath
+}
+
+function listFileRowsByParent(db, parent) {
+  return stmt(db, 'SELECT * FROM library_files WHERE parent = ?').all(parent)
+}
+
+function deleteFileRowsNotIn(db, parent, seenPaths) {
+  const existing = stmt(db, 'SELECT path FROM library_files WHERE parent = ?').all(parent)
+  for (const row of existing) {
+    if (seenPaths.has(row.path)) continue
+    stmt(db, 'DELETE FROM library_files WHERE path = ?').run(row.path)
+  }
+}
+
+export function songNameFromFilename(filename) {
+  if (!filename) return ''
+  let base = String(filename).replace(/\.(flac|m4a|mp3)$/i, '')
+  // Strip leading "NN. " or "NN - " or "NN " track-number prefix.
+  base = base.replace(/^\s*\d{1,3}\s*[.\-]?\s+/, '')
+  // Strip the [E]/[C]/[M] choice tags amdp may append.
+  base = base.replace(/\s*\[[ECM]\]\s*$/i, '')
+  return base.trim()
+}
+
+export function parsePlaylistM3uText(text) {
+  const lines = String(text || '').split(/\r?\n/)
+  let playlistTitle = null
+  let catalogPlaylistId = null
+  let libraryPlaylistId = null
+  let trackCount = 0
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const extInf = trimmed.match(/^#EXTINF:/)
+    if (extInf) {
+      continue
+    }
+    if (trimmed.startsWith('#')) {
+      const playM = trimmed.match(/^#PLAYLIST:(.+)$/)
+      if (playM) {
+        playlistTitle = playM[1].trim()
+        continue
+      }
+      const catalogM = trimmed.match(/^#ALACARTE_PLAYLIST_ID:(.+)$/)
+      if (catalogM) {
+        catalogPlaylistId = catalogM[1].trim()
+        continue
+      }
+      const libM = trimmed.match(/^#ALACARTE_LIBRARY_PLAYLIST_ID:(.+)$/)
+      if (libM) {
+        libraryPlaylistId = libM[1].trim()
+        continue
+      }
+      continue
+    }
+    trackCount++
+  }
+
+  return {
+    playlistTitle: playlistTitle || null,
+    catalogPlaylistId: catalogPlaylistId || null,
+    libraryPlaylistId: libraryPlaylistId || null,
+    trackCount,
+  }
+}
+
+async function readPlaylistM3uFileMeta(absPath) {
+  try {
+    const text = await fsp.readFile(absPath, 'utf8')
+    return parsePlaylistM3uText(text)
+  } catch {
+    return {
+      playlistTitle: null,
+      catalogPlaylistId: null,
+      libraryPlaylistId: null,
+      trackCount: 0,
+    }
+  }
+}
+
+export function resolvePlaylistM3u8AbsPath(musicRoot, relPath) {
+  const root = path.resolve(String(musicRoot || ''))
+  const playlistsRoot = path.join(root, PLAYLISTS_FOLDER)
+  const normalized = String(relPath || '')
+    .split(/[\\/]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  if (normalized.length === 0) {
+    throw new Error('invalid playlist path')
+  }
+  if (normalized.some((p) => p.startsWith('.'))) {
+    throw new Error('invalid playlist path')
+  }
+  const abs = path.resolve(root, ...normalized)
+  if (!(abs === playlistsRoot || abs.startsWith(`${playlistsRoot}${path.sep}`))) {
+    throw new Error('out of playlists directory')
+  }
+  if (!/\.m3u8$/i.test(abs)) {
+    throw new Error('not an m3u8 file')
+  }
+  return abs
+}
+
+export async function purgePlaylistExportsSharingIds(
+  musicRoot,
+  { playlistId, libraryPlaylistId, keepAbsPath },
+) {
+  const playlistsDir = path.join(musicRoot, PLAYLISTS_FOLDER)
+  const catalogStr = playlistId ? String(playlistId).trim() : ''
+  const libraryStr = libraryPlaylistId ? String(libraryPlaylistId).trim() : ''
+  if (!catalogStr && !libraryStr) return
+
+  const entries = await readDirSafe(playlistsDir)
+  const keepResolved = keepAbsPath ? path.resolve(keepAbsPath) : null
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.m3u8$/i.test(entry.name)) continue
+    const abs = path.join(playlistsDir, entry.name)
+    if (keepResolved && path.resolve(abs) === keepResolved) continue
+    const meta = await readPlaylistM3uFileMeta(abs)
+    const matchCatalog = Boolean(catalogStr && meta.catalogPlaylistId === catalogStr)
+    const matchLibrary = Boolean(libraryStr && meta.libraryPlaylistId === libraryStr)
+    if (matchCatalog || matchLibrary) {
+      await fsp.unlink(abs).catch(() => null)
+      const stem = path.basename(abs, path.extname(abs))
+      for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
+        await fsp.unlink(path.join(playlistsDir, `${stem}${ext}`)).catch(() => null)
+      }
+      const companionDir = path.join(playlistsDir, stem)
+      const companionStat = await fsp.stat(companionDir).catch(() => null)
+      if (companionStat?.isDirectory()) {
+        await fsp.rm(companionDir, { recursive: true, force: true }).catch(() => null)
+      }
+    }
+  }
+}
+
+export async function isPlaylistInLibrary(playlistId, preScannedIndex = null) {
+  if (!playlistId) return false
+  const index = preScannedIndex || (await getCachedIndex())
+  return index.playlistIds.has(String(playlistId))
+}
+
+export async function hasAlbumInLibrary(artistName, albumName, preScannedIndex = null, upc = null) {
+  const index = preScannedIndex || (await getCachedIndex())
+  const upcNorm = normalizeUpc(upc)
+  if (upcNorm && index.upcs?.has(upcNorm)) return true
+  const key = makeAlbumKey(artistName, stripTrailingYear(albumName))
+  if (!key) return false
+  if (index.albumKeys.has(key)) return true
+  // multi-artist releases are often imported under a shorter artist folder
+  return isAlbumKeyVariantMatch(index.albumKeys, key)
+}
+
+export async function getAlbumTrackPresence(artistName, albumName, tracks, preScannedIndex = null) {
+  const index = preScannedIndex || (await getCachedIndex())
+  const albumKey = makeAlbumKey(artistName, albumName)
+  const albumTrackSet = albumKey ? index.albumTrackKeys.get(albumKey) || null : null
+  const singlesSet = index.singlesSongKeys || new Set()
+  const isrcSet = index.isrcs || new Set()
+  const present = {}
+  let count = 0
+  let isrcCount = 0
+  for (const track of tracks || []) {
+    const id = String(track?.id || '')
+    if (!id) continue
+    const songKey = makeSongKey(artistName, track?.name || '')
+    const isrcNorm = normalizeIsrc(track?.isrc)
+    const byIsrc = Boolean(isrcNorm && isrcSet.has(isrcNorm))
+    const has = Boolean(
+      (songKey && ((albumTrackSet && albumTrackSet.has(songKey)) || singlesSet.has(songKey))) ||
+        byIsrc,
+    )
+    if (byIsrc) isrcCount += 1
+    present[id] = has
+    if (has) count += 1
+  }
+  const expected = (tracks || []).length
+  return {
+    tracks: present,
+    present: count,
+    expected,
+    // A folder keyed by Apple's album artist may not exist when files were
+    // imported under a different artist spelling; every track matching by
+    // ISRC is still proof the album is on disk.
+    complete:
+      expected > 0 &&
+      count === expected &&
+      (Boolean(albumTrackSet) || (count > 0 && isrcCount === count)),
+    folderExists: Boolean(albumTrackSet),
+  }
+}
+
+export async function hasSongInLibrary(artistName, songName, preScannedIndex = null, isrc = null) {
+  const index = preScannedIndex || (await getCachedIndex())
+  const isrcNorm = normalizeIsrc(isrc)
+  if (isrcNorm && index.isrcs?.has(isrcNorm)) return true
+  const key = makeSongKey(artistName, songName)
+  if (!key) return false
+  return index.songKeys.has(key)
+}
+
+// Absolute path of an existing library file for this song, or null. ISRC
+// wins. Otherwise an artist/title match counts on the same album (an owned
+// clean/explicit twin or re-registered release is still that album's track),
+// or as a loose Singles file whose ISRC does not contradict. A title match on
+// a different album never counts, so "Intro" or a live cut is not linked.
+export async function findSongPathInLibrary(
+  artistName,
+  songName,
+  isrc = null,
+  preScannedIndex = null,
+  { album = null } = {},
+) {
+  const index = preScannedIndex || (await getCachedIndex())
+  const isrcNorm = normalizeIsrc(isrc)
+  const byIsrc = isrcNorm ? index.isrcPaths?.get(isrcNorm) : null
+  if (byIsrc) return path.join(getMusicRoot(), byIsrc)
+  const key = makeSongKey(artistName, songName)
+  const wantAlbum = album ? albumMatchName(album) : null
+  const conflicts = (c) => Boolean(isrcNorm && c.isrc && c.isrc !== isrcNorm)
+  const match = (key && index.songCandidates?.get(key) || []).find((c) =>
+    wantAlbum ? c.album === wantAlbum || (!c.album && !conflicts(c)) : !conflicts(c),
+  )
+  return match ? path.join(getMusicRoot(), match.rel) : null
+}
+
+// Folder names went through sanitizeSegment, so compare requested album
+// names in the same form.
+function albumMatchName(name) {
+  return normalizeForMatchKey(stripTrailingYear(sanitizeSegment(name))).toLowerCase()
+}
+
+export async function getAlbumVersionGroups(artistName, albumName, upc = null, preScannedIndex = null) {
+  const index = preScannedIndex || (await scanLibraryOnce())
+  const groups = new Set()
+  const upcNorm = normalizeUpc(upc)
+  if (upcNorm && index.upcs.has(upcNorm)) groups.add('lossless')
+  const baseKey = makeAlbumKey(artistName, albumName)
+  if (index.albumKeys.has(baseKey)) groups.add('lossless')
+  for (const g of index.albumVersionGroups.get(baseKey) || []) groups.add(g)
+  return groups
+}
+
+export function makeAlbumKey(artistName, albumName) {
+  return makeAlbumMatchKey(artistName, albumName)
+}
+
+export function makeSongKey(artistName, songName) {
+  return makeSongMatchKey(artistName, songName)
+}
+
+async function hasSiblingLrc(audioPath) {
+  const dir = path.dirname(audioPath)
+  const base = path.basename(audioPath, path.extname(audioPath))
+  for (const ext of ['.lrc', '.ttml']) {
+    const p = path.join(dir, `${base}${ext}`)
+    const stat = await fsp.stat(p).catch(() => null)
+    if (stat?.isFile()) return true
+  }
+  return false
+}
+
+function readDirSafe(dir) {
+  return fsp.readdir(dir, { withFileTypes: true }).catch(() => [])
+}
+
+function toRel(absPath) {
+  return path.relative(getMusicRoot(), absPath).split(path.sep).join('/')
+}
+
+
+// ---------------------------------------------------------------------------
+// Mes Decouvertes : index a part, utilise seulement par l'integration
+// octo-fiesta pour retrouver ce qu'elle a deja fait telecharger.
+
+let _discoveryCache = null
+let _discoveryCacheAt = 0
+const DISCOVERY_TTL_MS = 30_000
+
+function discoveryRoot() {
+  return path.join(getMusicRoot(), DISCOVERY_FOLDER)
+}
+
+async function scanDiscovery() {
+  const acc = emptyIndex()
+  const ctx = { db: null, mode: 'ephemeral', useCache: false, persist: false }
+  const root = discoveryRoot()
+  for (const entry of await readDirSafe(root)) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    await scanAudioDir(path.join(root, entry.name), 'album', DISCOVERY_FOLDER, ctx, acc)
+  }
+  return acc
+}
+
+async function getDiscoveryIndex() {
+  const now = Date.now()
+  if (_discoveryCache && now - _discoveryCacheAt < DISCOVERY_TTL_MS) return _discoveryCache
+  _discoveryCache = await scanDiscovery()
+  _discoveryCacheAt = now
+  return _discoveryCache
+}
+
+export async function findSongPathInDiscovery(artistName, songName, isrc = null, { album = null } = {}) {
+  const index = await getDiscoveryIndex()
+  return findSongPathInLibrary(artistName, songName, isrc, index, { album })
+}
+
+// Quand un titre est maintenant dans la vraie bibliotheque (meme ISRC), sa
+// copie dans Mes Decouvertes est supprimee, avec ses paroles et les dossiers
+// devenus vides.
+export async function pruneDiscoveryDuplicates() {
+  invalidateLibraryCache()
+  const main = await scanLibraryOnce()
+  const disco = await getDiscoveryIndex()
+  const root = discoveryRoot()
+  const touchedDirs = new Set()
+  let removed = 0
+  for (const [isrc, rel] of disco.isrcPaths || []) {
+    if (!main.isrcPaths?.has(isrc)) continue
+    const abs = path.join(getMusicRoot(), rel)
+    if (!path.resolve(abs).startsWith(path.resolve(root) + path.sep)) continue
+    const stem = abs.slice(0, abs.length - path.extname(abs).length)
+    await fsp.rm(abs, { force: true }).catch(() => {})
+    for (const ext of ['.lrc', '.ttml']) await fsp.rm(stem + ext, { force: true }).catch(() => {})
+    touchedDirs.add(path.dirname(abs))
+    removed += 1
+  }
+  for (const dir of touchedDirs) {
+    if (path.resolve(dir) === path.resolve(root)) continue
+    const left = await readDirSafe(dir)
+    if (left.some((e) => e.isFile() && AUDIO_RE.test(e.name))) continue
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+  if (removed) {
+    console.log(`[discovery] ${removed} titre(s) retire(s) de ${DISCOVERY_FOLDER} (maintenant dans la bibliotheque)`)
+    invalidateLibraryCache()
+  }
+  return removed
+}
+
+// Jellyfin ignore tout dossier qui contient un fichier .ignore : Mes Decouvertes
+// reste donc hors de la bibliotheque Jellyfin (seul Allstarr lit ces fichiers).
+export async function ensureDiscoveryFolder() {
+  const root = discoveryRoot()
+  await fsp.mkdir(root, { recursive: true })
+  await fsp.writeFile(path.join(root, '.ignore'), '', { flag: 'wx' }).catch((err) => {
+    if (err?.code !== 'EEXIST') throw err
+  })
+}
+
+// Les decouvertes jamais gardees (coeur) sont supprimees apres
+// AMDL_DISCOVERY_DAYS jours sans ecoute (30 par defaut, 0 = jamais).
+export async function cleanOldDiscoveries(days = Number(process.env.AMDL_DISCOVERY_DAYS ?? 30)) {
+  if (!Number.isFinite(days) || days <= 0) return 0
+  const root = discoveryRoot()
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+  let removed = 0
+  for (const entry of await readDirSafe(root)) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    const dir = path.join(root, entry.name)
+    let newest = 0
+    for (const f of await readDirSafe(dir)) {
+      if (!f.isFile()) continue
+      const st = await statSafe(path.join(dir, f.name))
+      newest = Math.max(newest, st?.mtimeMs || 0, st?.atimeMs || 0)
+    }
+    if (newest && newest < cutoff) {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
+      removed += 1
+    }
+  }
+  if (removed) {
+    console.log(`[discovery] ${removed} dossier(s) de plus de ${days} jours retire(s) de ${DISCOVERY_FOLDER}`)
+    invalidateLibraryCache()
+  }
+  return removed
+}
