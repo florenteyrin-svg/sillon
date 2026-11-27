@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/florenteyrin-svg/sillon/server/internal/events"
 	"github.com/florenteyrin-svg/sillon/server/internal/scanner"
 	"github.com/florenteyrin-svg/sillon/server/internal/smart"
+	"github.com/florenteyrin-svg/sillon/server/internal/streamcache"
 	"github.com/florenteyrin-svg/sillon/server/internal/subsonic"
 )
 
@@ -27,6 +29,7 @@ type API struct {
 	Scanner  *scanner.Scanner
 	Alacarte *alacarte.Client // nil when not configured
 	Subsonic *subsonic.Server
+	Cache    *streamcache.Cache
 
 	polling sync.Mutex
 }
@@ -43,6 +46,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/catalog/artist/{id}", a.auth(a.catalogArtist))
 	mux.HandleFunc("POST /api/catalog/download", a.auth(a.catalogDownload))
 	mux.HandleFunc("GET /api/catalog/jobs", a.auth(a.catalogJobs))
+	mux.HandleFunc("POST /api/catalog/play", a.auth(a.catalogPlay))
+	mux.HandleFunc("GET /api/catalog/stream/{id}", a.auth(a.catalogStream))
+	mux.HandleFunc("GET /api/recent", a.auth(a.recent))
 	mux.HandleFunc("GET /api/smart-playlists", a.auth(a.smartList))
 	mux.HandleFunc("POST /api/smart-playlists", a.auth(a.smartCreate))
 	mux.HandleFunc("PUT /api/smart-playlists/{id}", a.auth(a.smartUpdate))
@@ -314,6 +320,10 @@ func (a *API) catalogDownload(w http.ResponseWriter, r *http.Request, u *db.User
 		alacarteError(w, err)
 		return
 	}
+	// The library copy replaces the listening copy
+	if body.Type == "song" && a.Cache != nil && streamcache.ValidID(body.ID) {
+		a.Cache.Remove(body.ID)
+	}
 	go a.pollJobs()
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, res)
@@ -332,6 +342,114 @@ func (a *API) catalogJobs(w http.ResponseWriter, r *http.Request, u *db.User) {
 		jobs = []map[string]any{}
 	}
 	writeJSON(w, map[string]any{"jobs": jobs})
+}
+
+// catalogPlay starts listening to an Apple Music song that is not in the library. The answer comes at
+// once with the address to play; the audio starts flowing a few seconds later, while it downloads.
+func (a *API) catalogPlay(w http.ResponseWriter, r *http.Request, u *db.User) {
+	if !a.requireAlacarte(w) {
+		return
+	}
+	var b struct {
+		ID       string  `json:"id"`
+		AlbumID  string  `json:"albumId"`
+		Title    string  `json:"title"`
+		Artist   string  `json:"artist"`
+		Album    string  `json:"album"`
+		Artwork  string  `json:"artwork"`
+		Duration float64 `json:"duration"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || !streamcache.ValidID(b.ID) {
+		jsonError(w, 400, "a catalog song id is required")
+		return
+	}
+	a.DB.RecordCatalogPlay(u.ID, db.CatalogPlay{AppleID: b.ID, Title: b.Title, Artist: b.Artist, Album: b.Album,
+		AppleAlbumID: b.AlbumID, Artwork: b.Artwork, Duration: b.Duration})
+	status := "done"
+	if !a.Cache.Ready(b.ID) {
+		var err error
+		if status, err = a.Alacarte.StartStream(b.ID, b.AlbumID); err != nil {
+			alacarteError(w, err)
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"id": b.ID, "status": status, "url": "/api/catalog/stream/" + b.ID})
+}
+
+func (a *API) catalogStream(w http.ResponseWriter, r *http.Request, u *db.User) {
+	id := r.PathValue("id")
+	if !streamcache.ValidID(id) || a.Cache == nil {
+		jsonError(w, 404, "unknown song")
+		return
+	}
+	// Opened without a "play" call first (e.g. resumed after a restart): start fetching it now
+	if a.Cache.Status(id) == nil && a.Alacarte != nil {
+		if _, err := a.Alacarte.StartStream(id, r.Form.Get("albumId")); err != nil {
+			alacarteError(w, err)
+			return
+		}
+	}
+	a.Cache.Serve(w, r, id)
+	go a.Cache.Trim()
+}
+
+// recent lists what was played lately, library songs and catalog songs together (newest first).
+func (a *API) recent(w http.ResponseWriter, r *http.Request, u *db.User) {
+	limit, _ := strconv.Atoi(r.Form.Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 30
+	}
+	type item struct {
+		Kind     string  `json:"kind"` // library | catalog
+		ID       string  `json:"id"`   // Sillon track id or Apple song id
+		Title    string  `json:"title"`
+		Artist   string  `json:"artist"`
+		Album    string  `json:"album"`
+		AlbumID  string  `json:"albumId,omitempty"`
+		Artwork  string  `json:"artwork,omitempty"` // catalog: Apple artwork template
+		Quality  string  `json:"quality,omitempty"`
+		Duration float64 `json:"duration"`
+		PlayedAt int64   `json:"playedAt"`
+		Cached   bool    `json:"cached,omitempty"`
+	}
+	var items []item
+	tracks, err := a.DB.QueryTracks(`JOIN plays p ON p.track_id = t.id AND p.user_id = ? ORDER BY p.last_played DESC LIMIT ?`, u.ID, limit)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	played := map[string]int64{}
+	if rows, err := a.DB.Query(`SELECT track_id, last_played FROM plays WHERE user_id = ? ORDER BY last_played DESC LIMIT ?`, u.ID, limit); err == nil {
+		for rows.Next() {
+			var id string
+			var at int64
+			rows.Scan(&id, &at)
+			played[id] = at
+		}
+		rows.Close()
+	}
+	for _, t := range tracks {
+		items = append(items, item{Kind: "library", ID: t.ID, Title: t.Title, Artist: t.Artist, Album: t.Album,
+			AlbumID: t.AlbumID, Quality: t.Quality, Duration: t.Duration, PlayedAt: played[t.ID]})
+	}
+	cps, err := a.DB.CatalogPlays(u.ID, limit)
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
+	for _, p := range cps {
+		items = append(items, item{Kind: "catalog", ID: p.AppleID, Title: p.Title, Artist: p.Artist, Album: p.Album,
+			AlbumID: p.AppleAlbumID, Artwork: p.Artwork, Duration: p.Duration, PlayedAt: p.PlayedAt,
+			Cached: a.Cache != nil && a.Cache.Ready(p.AppleID)})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].PlayedAt > items[j].PlayedAt })
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	if items == nil {
+		items = []item{}
+	}
+	writeJSON(w, items)
 }
 
 // pollJobs follows à la carte's queue after a download request and relays progress as live events,

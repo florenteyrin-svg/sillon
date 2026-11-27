@@ -32,6 +32,7 @@ export async function writeAmdpConfig({
   settings,
   mediaUserToken,
   stagingRoot,
+  overrides = {},
 }) {
   const lyricsEnabled = Boolean(settings.downloadLyrics && mediaUserToken)
   const cfg = {
@@ -94,6 +95,7 @@ export async function writeAmdpConfig({
     'convert-skip-lossy-to-lossless': true,
     'convert-check-bad-alac': false,
     'convert-delete-bad-alac': false,
+    ...overrides,
   }
   const configPath = path.join(stagingRoot, 'config.yaml')
   await fsp.writeFile(configPath, emitYaml(cfg), { mode: 0o600 })

@@ -167,3 +167,16 @@ func (c *Client) Jobs() ([]map[string]any, error) {
 	}
 	return out, nil
 }
+
+// StartStream asks à la carte to fetch a song into the stream cache (see alacarte/backend/routes/stream.mjs).
+func (c *Client) StartStream(id, albumID string) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	body := map[string]any{}
+	if albumID != "" {
+		body["albumId"] = albumID
+	}
+	err := c.Do("POST", "/api/stream/song/"+url.PathEscape(id), body, &out)
+	return out.Status, err
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/florenteyrin-svg/sillon/server/internal/db"
 	"github.com/florenteyrin-svg/sillon/server/internal/events"
 	"github.com/florenteyrin-svg/sillon/server/internal/scanner"
+	"github.com/florenteyrin-svg/sillon/server/internal/streamcache"
 	"github.com/florenteyrin-svg/sillon/server/internal/subsonic"
 )
 
@@ -48,7 +49,11 @@ func main() {
 	covers := &subsonic.Covers{DB: d, MusicDir: cfg.MusicDir, CacheDir: filepath.Join(cfg.DataDir, "covers")}
 	sub := &subsonic.Server{DB: d, Scanner: sc, MusicDir: cfg.MusicDir, DataDir: cfg.DataDir, Covers: covers}
 	ac := alacarte.New(cfg.AlacarteURL, cfg.AlacarteUser, cfg.AlacartePass)
-	a := &api.API{DB: d, Hub: hub, Scanner: sc, Alacarte: ac, Subsonic: sub}
+	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+		log.Printf("cache: %v", err)
+	}
+	cache := &streamcache.Cache{Dir: cfg.CacheDir, MaxBytes: int64(cfg.CacheMaxGB * (1 << 30))}
+	a := &api.API{DB: d, Hub: hub, Scanner: sc, Alacarte: ac, Subsonic: sub, Cache: cache}
 
 	// A new or changed album may have a new cover
 	go func() {
@@ -69,6 +74,7 @@ func main() {
 	}()
 
 	stop := make(chan struct{})
+	go cache.Run(stop)
 	// Watch first, so files arriving during the first scan are not missed
 	go func() {
 		if err := sc.Watch(stop); err != nil {

@@ -27,6 +27,7 @@ import { originGuard } from './lib/originGuard.mjs'
 import { errorHandler } from './lib/errorHandler.mjs'
 import { integrationRouter } from './routes/integration.mjs'
 import { clipsRouter } from './routes/clips.mjs'
+import { streamRouter } from './routes/stream.mjs'
 import { isPasswordSet } from './lib/authStore.mjs'
 import { generateSetupToken } from './lib/setupToken.mjs'
 import { isAuthDisabled, requireAuth } from './lib/requireAuth.mjs'
@@ -134,6 +135,7 @@ app.use('/api/imports', importsRouter)
 app.use('/api/cloud-library', cloudLibraryRouter)
 app.use('/api/clips', clipsRouter)
 app.use('/api/integration/v1', integrationRouter)
+app.use('/api/stream', streamRouter)
 
 applyAppleGatewaySettings({ resetPace: false }).catch(() => {})
 // Keep the catalog storefront aligned with the Apple ID's real region; a stale

@@ -138,6 +138,20 @@ var migrations = []string{
 		changed_at INTEGER NOT NULL,
 		changed_by TEXT NOT NULL DEFAULT ''
 	);`,
+	// Songs played from the Apple Music catalog (not in the library), for "Recently played"
+	`CREATE TABLE catalog_plays (
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		apple_id TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		artist TEXT NOT NULL DEFAULT '',
+		album TEXT NOT NULL DEFAULT '',
+		apple_album_id TEXT NOT NULL DEFAULT '',
+		artwork TEXT NOT NULL DEFAULT '',
+		duration REAL NOT NULL DEFAULT 0,
+		played_at INTEGER NOT NULL,
+		PRIMARY KEY (user_id, apple_id)
+	);
+	CREATE INDEX catalog_plays_recent ON catalog_plays(user_id, played_at);`,
 }
 
 func (d *DB) migrate() error {

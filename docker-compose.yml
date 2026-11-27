@@ -14,10 +14,12 @@ services:
       - ALACARTE_URL=http://alacarte-web:7373
       - ALACARTE_USER=${ALACARTE_USER:-}
       - ALACARTE_PASSWORD=${ALACARTE_PASSWORD:-}
+      - SILLON_CACHE_MAX_GB=${SILLON_CACHE_MAX_GB:-10}
       - TZ=${TZ:-Europe/Paris}
     volumes:
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/music:ro   # Sillon never changes your files
       - ${SILLON_DATA_PATH:-./data/sillon}:/data
+      - ${SILLON_CACHE_PATH:-./data/cache}:/cache      # songs played without downloading (outside the music folder)
     ports:
       - "${SILLON_PORT:-4747}:4747"
     networks: [default]
@@ -70,6 +72,7 @@ services:
       - AMDL_SECRET_KEY=${AMDL_SECRET_KEY:-}
       - AUTH_DISABLED=false
       - TRUST_PROXY=loopback
+      - AMDL_STREAM_CACHE=/cache
       - AMDL_DISCOVERY_DAYS=${AMDL_DISCOVERY_DAYS:-30}
       - AMDL_ANIMATED_ARTWORK=${AMDL_ANIMATED_ARTWORK:-1}
       - AMDL_CLIPS_FOLDER=${AMDL_CLIPS_FOLDER:-Mes Clips}
@@ -79,6 +82,7 @@ services:
       - ${ALACARTE_DATA_PATH:-./data/alacarte}/web:/config
       - ${ALACARTE_DATA_PATH:-./data/alacarte}/supervisor:/supervisor-secret:ro
       - ${MUSIC_PATH}:/music
+      - ${SILLON_CACHE_PATH:-./data/cache}:/cache
     # Its own page, for the Apple sign-in and its settings: home network only, no domain needed.
     ports:
       - "${ALACARTE_PORT:-7373}:7373"

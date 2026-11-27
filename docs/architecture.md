@@ -59,6 +59,9 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 | GET | `/api/catalog/artist/{id}` | Détail d'un artiste Apple Music |
 | POST | `/api/catalog/download` | `{"type":"album"\|"song"\|"playlist","id":"…"}` |
 | GET | `/api/catalog/jobs` | Téléchargements en cours et récents |
+| POST | `/api/catalog/play` | Écoute directe d'un titre Apple Music `{"id","albumId","title","artist","album","artwork","duration"}` → `{"url"}` |
+| GET | `/api/catalog/stream/{id}` | Le son du titre (MP4/ALAC), envoyé pendant qu'il se télécharge, puis depuis le cache |
+| GET | `/api/recent` | Récemment écoutés : titres de la bibliothèque et du catalogue mélangés |
 | GET/POST | `/api/smart-playlists` | Liste / création `{"name","rules"}` |
 | PUT | `/api/smart-playlists/{id}` | Modification |
 | POST | `/api/smart-playlists/preview` | Nombre de titres d'un jeu de règles |
@@ -86,6 +89,18 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 - Dates : `added lastplayed` (`inlast notinlast`, en jours).
 - `starred` : `true` / `false`.
 - Tri : `random added added_asc plays last_played title artist year`.
+
+## Écoute directe (catalogue Apple Music)
+
+1. L'appli appelle `POST /api/catalog/play`. Sillon demande à à la carte (`POST /api/stream/song/{id}`,
+   ajouté dans `alacarte/backend/routes/stream.mjs`) de récupérer le titre dans `/cache/{id}/`, jamais
+   dans la bibliothèque.
+2. L'outil de téléchargement est réglé pour écrire le fichier au fil du déchiffrement
+   (`max-memory-limit: 0`) ; Sillon envoie ce fichier qui grandit au téléphone (`/api/catalog/stream/{id}`).
+   Le son démarre dès les premiers fragments, quelques secondes après l'appui.
+3. Réécouter le titre = lecture depuis le cache, instantanée et avec avance rapide.
+4. Le cache garde sa taille sous `SILLON_CACHE_MAX_GB` (10 Go) : les titres écoutés le moins récemment
+   partent en premier. Télécharger un titre avec la flèche le retire du cache.
 
 ## Suite : mix DJ
 

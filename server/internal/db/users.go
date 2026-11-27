@@ -180,3 +180,43 @@ func (d *DB) PlayQueue(userID int64) (*PlayQueue, error) {
 	}
 	return q, nil
 }
+
+// ---- Catalog plays (songs listened to from Apple Music without downloading) ----
+
+type CatalogPlay struct {
+	AppleID, Title, Artist, Album, AppleAlbumID, Artwork string
+	Duration                                             float64
+	PlayedAt                                             int64
+}
+
+func (d *DB) RecordCatalogPlay(userID int64, p CatalogPlay) error {
+	_, err := d.Exec(`INSERT INTO catalog_plays (user_id, apple_id, title, artist, album, apple_album_id, artwork, duration, played_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, apple_id) DO UPDATE SET
+		title = CASE WHEN excluded.title != '' THEN excluded.title ELSE title END,
+		artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE artist END,
+		album = CASE WHEN excluded.album != '' THEN excluded.album ELSE album END,
+		apple_album_id = CASE WHEN excluded.apple_album_id != '' THEN excluded.apple_album_id ELSE apple_album_id END,
+		artwork = CASE WHEN excluded.artwork != '' THEN excluded.artwork ELSE artwork END,
+		duration = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE duration END,
+		played_at = excluded.played_at`,
+		userID, p.AppleID, p.Title, p.Artist, p.Album, p.AppleAlbumID, p.Artwork, p.Duration, time.Now().Unix())
+	return err
+}
+
+func (d *DB) CatalogPlays(userID int64, limit int) ([]CatalogPlay, error) {
+	rows, err := d.Query(`SELECT apple_id, title, artist, album, apple_album_id, artwork, duration, played_at
+		FROM catalog_plays WHERE user_id = ? ORDER BY played_at DESC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CatalogPlay
+	for rows.Next() {
+		var p CatalogPlay
+		if err := rows.Scan(&p.AppleID, &p.Title, &p.Artist, &p.Album, &p.AppleAlbumID, &p.Artwork, &p.Duration, &p.PlayedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

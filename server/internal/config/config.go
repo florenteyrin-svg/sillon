@@ -15,6 +15,9 @@ type Config struct {
 	AdminPass  string // its password; generated and logged when empty
 	RescanEvery time.Duration // safety rescan in case a file change was missed
 
+	CacheDir   string // songs played from the catalog without being downloaded (shared with à la carte)
+	CacheMaxGB float64
+
 	AlacarteURL  string // e.g. http://alacarte-web:7373 (empty: catalog search off)
 	AlacarteUser string
 	AlacartePass string
@@ -28,6 +31,8 @@ func Load() Config {
 		AdminUser:    env("SILLON_ADMIN_USER", "admin"),
 		AdminPass:    os.Getenv("SILLON_ADMIN_PASSWORD"),
 		RescanEvery:  time.Duration(envInt("SILLON_RESCAN_HOURS", 6)) * time.Hour,
+		CacheDir:     env("SILLON_CACHE_DIR", "/cache"),
+		CacheMaxGB:   float64(envInt("SILLON_CACHE_MAX_GB", 10)),
 		AlacarteURL:  os.Getenv("ALACARTE_URL"),
 		AlacarteUser: os.Getenv("ALACARTE_USER"),
 		AlacartePass: os.Getenv("ALACARTE_PASSWORD"),
