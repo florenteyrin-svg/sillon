@@ -1,7 +1,7 @@
 # Sillon DJ: prepares the transitions of the DJ mix (beats, stems with Demucs, vocal swap).
 # PyTorch built for CUDA 11.8 still runs on older NVIDIA cards (e.g. Quadro M2000); without a usable GPU
 # it works on the CPU.
-FROM python:3.11-slim
+FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
   && ffmpeg -hide_banner -filters | grep -q rubberband
