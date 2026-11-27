@@ -10,6 +10,8 @@ RUN pip install --no-cache-dir demucs==4.1.0 librosa==1.0.1 soundfile
 ENV HF_HOME=/models
 # The separation model is part of the image: nothing to download at start
 RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
+# Use the model above, never look for updates online
+ENV HF_HUB_OFFLINE=1
 COPY sillon_dj.py /app/sillon_dj.py
 ENV SILLON_DJ_PORT=8085
 EXPOSE 8085

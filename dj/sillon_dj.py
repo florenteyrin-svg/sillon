@@ -169,9 +169,20 @@ class Separator:
             mix = torch.from_numpy(x)
             ref = mix.mean(0)
             mean, std = ref.mean(), ref.std() + 1e-8
-            with torch.no_grad():
-                out = apply_model(self.model, ((mix - mean) / std)[None], device=device, split=True,
-                                  overlap=0.25, progress=False)[0]
+            try:
+                with torch.no_grad():
+                    out = apply_model(self.model, ((mix - mean) / std)[None], device=device, split=True,
+                                      overlap=0.25, progress=False)[0]
+            except RuntimeError as e:
+                if device != "cuda":
+                    raise
+                # The card passed the start-up test but cannot run the model: use the CPU from now on
+                log.warning("GPU separation failed (%s), switching to the CPU", str(e)[:200])
+                self.device = device = "cpu"
+                torch.cuda.empty_cache()
+                with torch.no_grad():
+                    out = apply_model(self.model, ((mix - mean) / std)[None], device="cpu", split=True,
+                                      overlap=0.25, progress=False)[0]
             out = out * std + mean
             if device == "cuda":
                 torch.cuda.empty_cache()
