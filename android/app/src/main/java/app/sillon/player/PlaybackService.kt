@@ -129,6 +129,17 @@ class PlaybackService : MediaLibraryService() {
     private fun recoverFromError() {
         val item = player.currentMediaItem ?: return
         val id = item.mediaId
+        // Without network, a song that is not on the phone is skipped: on to the next one that is
+        if (offline() && !app.sillon.data.Offline.has(id)) {
+            val next = (player.currentMediaItemIndex + 1 until player.mediaItemCount)
+                .firstOrNull { app.sillon.data.Offline.has(player.getMediaItemAt(it).mediaId) }
+            if (next != null) {
+                player.seekTo(next, 0)
+                player.prepare()
+                player.play()
+            }
+            return
+        }
         if (id != retriedId) { retriedId = id; retries = 0 }
         if (retries >= 3) return
         retries++
@@ -227,7 +238,70 @@ class PlaybackService : MediaLibraryService() {
         return tracks.map { it.toMediaItem(api) }
     }
 
-    private suspend fun children(parentId: String): List<MediaItem> = when {
+    // ---- without network: what is on the phone ----
+
+    private val cache get() = (application as SillonApp).cache
+    private var serverDownAt = 0L
+
+    /** No network, or the server failed less than a minute ago: answer at once from the phone. */
+    private fun offline(): Boolean {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+        val connected = caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        return !connected || System.currentTimeMillis() - serverDownAt < 60_000
+    }
+
+    private suspend fun children(parentId: String): List<MediaItem> {
+        if (!offline()) {
+            runCatching { return onlineChildren(parentId) }
+            if (parentId != ROOT) serverDownAt = System.currentTimeMillis()
+        }
+        return offlineChildren(parentId)
+    }
+
+    private fun phoneSongs(): List<QueueTrack> = app.sillon.data.Offline.tracks.values.toList()
+
+    private fun phoneEntry(): MediaItem? = phoneSongs().takeIf { it.isNotEmpty() }?.let {
+        browsable(ON_PHONE, "Sur le téléphone", "${it.size} titres · sans réseau", null, MediaMetadata.MEDIA_TYPE_PLAYLIST)
+    }
+
+    /** Songs on the phone only, arranged like the usual tabs; playlists seen before keep their songs that are on the phone. */
+    private suspend fun offlineChildren(parentId: String): List<MediaItem> {
+        val songs = phoneSongs()
+        return when {
+            parentId == ROOT -> onlineChildren(ROOT)
+            parentId == RECENT || parentId == ON_PHONE -> playable(parentId, songs.reversed())
+            parentId == PLAYLISTS -> listOfNotNull(phoneEntry()) +
+                cache.read("home-playlists", kotlinx.serialization.builtins.ListSerializer(app.sillon.data.Playlist.serializer())).orEmpty()
+                    .mapNotNull { pl ->
+                        val n = cache.read("playlist-${pl.id}", app.sillon.data.Playlist.serializer())?.entry
+                            ?.count { app.sillon.data.Offline.has(it.id) } ?: 0
+                        if (n == 0) null else browsable("pl:${pl.id}", pl.name, "$n titres sur le téléphone", api.coverUrl(pl.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
+                    }
+            parentId == ALBUMS -> songs.groupBy { it.albumId }.filterKeys { it.isNotEmpty() }.map { (id, list) ->
+                browsable("al:$id", list.first().album, list.first().artist, api.coverUrl(id, 300), MediaMetadata.MEDIA_TYPE_ALBUM)
+            }
+            parentId == ARTISTS -> songs.map { it.artist }.distinct().sorted().map {
+                browsable("oar:$it", it, null, null, MediaMetadata.MEDIA_TYPE_ARTIST)
+            }
+            parentId.startsWith("pl:") -> playable(parentId,
+                cache.read("playlist-${parentId.removePrefix("pl:")}", app.sillon.data.Playlist.serializer())?.entry.orEmpty()
+                    .filter { app.sillon.data.Offline.has(it.id) }.map { it.toQueueTrack(true) })
+            parentId.startsWith("al:") -> playable(parentId, songs.filter { it.albumId == parentId.removePrefix("al:") })
+            parentId.startsWith("oar:") || parentId.startsWith("ar:") -> {
+                val name = parentId.removePrefix("oar:")
+                playable(parentId, songs.filter { it.artist == name })
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun phoneSearch(query: String): List<QueueTrack> {
+        val q = query.lowercase()
+        return phoneSongs().filter { q in it.title.lowercase() || q in it.artist.lowercase() || q in it.album.lowercase() }
+    }
+
+    private suspend fun onlineChildren(parentId: String): List<MediaItem> = when {
         parentId == ROOT -> listOf(
             browsable(RECENT, "Récents", mediaType = MediaMetadata.MEDIA_TYPE_FOLDER_MIXED),
             browsable(PLAYLISTS, "Playlists", mediaType = MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS),
@@ -239,9 +313,13 @@ class PlaybackService : MediaLibraryService() {
                 appleArtwork(it.artwork), it.duration.toInt())
             else QueueTrack(it.id, it.title, it.artist, it.album, it.albumId ?: "", null, it.duration.toInt(), it.quality ?: "")
         })
-        parentId == PLAYLISTS -> api.playlists().map {
+        // "Sur le téléphone" first when songs are kept on the phone
+        parentId == PLAYLISTS -> listOfNotNull(phoneEntry()) + api.playlists().also {
+            cache.write("home-playlists", kotlinx.serialization.builtins.ListSerializer(app.sillon.data.Playlist.serializer()), it)
+        }.map {
             browsable("pl:${it.id}", it.name, "${it.songCount} titres", api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
         }
+        parentId == ON_PHONE -> playable(parentId, phoneSongs().reversed())
         // Favourite albums first (no searching while driving), then the newest ones
         parentId == ALBUMS -> {
             val favs = runCatching { api.starredAlbums() }.getOrDefault(emptyList())
@@ -257,7 +335,10 @@ class PlaybackService : MediaLibraryService() {
         parentId == ARTISTS -> api.artists().map {
             browsable("ar:${it.id}", it.name, null, api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ARTIST)
         }
-        parentId.startsWith("pl:") -> playable(parentId, api.playlist(parentId.removePrefix("pl:")).entry.map { it.toQueueTrack() })
+        // Kept for the car without network (same key as the app's screens)
+        parentId.startsWith("pl:") -> playable(parentId, api.playlist(parentId.removePrefix("pl:")).also {
+            cache.write("playlist-${it.id}", app.sillon.data.Playlist.serializer(), it)
+        }.entry.map { it.toQueueTrack() })
         parentId.startsWith("al:") -> playable(parentId, api.album(parentId.removePrefix("al:")).song.map { it.toQueueTrack() })
         parentId.startsWith("ar:") -> api.artist(parentId.removePrefix("ar:")).album.map {
             browsable("al:${it.id}", it.name, it.year.takeIf { y -> y > 0 }?.toString(), api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ALBUM)
@@ -270,6 +351,7 @@ class PlaybackService : MediaLibraryService() {
         if (item.mediaMetadata.title != null) return item.toQueueTrack().toMediaItem(api)
         known[item.mediaId]?.let { return it.toMediaItem(api) }
         if (item.mediaId.startsWith(CATALOG_PREFIX)) return item
+        app.sillon.data.Offline.tracks[item.mediaId]?.let { return it.toMediaItem(api) }
         return api.song(item.mediaId).toQueueTrack().also { known[it.id] = it }.toMediaItem(api)
     }
 
@@ -339,7 +421,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onSearch(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, query: String, params: LibraryParams?):
             ListenableFuture<LibraryResult<Void>> = scope.future {
-            val count = runCatching { api.search(query).songs.size }.getOrDefault(0)
+            val count = runCatching { api.search(query).songs.size }.getOrElse { phoneSearch(query).size }
             session.notifySearchResultChanged(browser, query, count, params)
             LibraryResult.ofVoid()
         }
@@ -347,7 +429,9 @@ class PlaybackService : MediaLibraryService() {
         override fun onGetSearchResult(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, query: String,
                                        page: Int, pageSize: Int, params: LibraryParams?): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
             scope.future {
-                val items = runCatching { playable("search:$query", api.search(query).songs.map { it.toQueueTrack() }) }.getOrDefault(emptyList())
+                // Without network, the songs on the phone
+                val items = runCatching { playable("search:$query", api.search(query).songs.map { it.toQueueTrack() }) }
+                    .getOrElse { playable("search:$query", phoneSearch(query)) }
                 LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
             }
 
@@ -393,5 +477,6 @@ class PlaybackService : MediaLibraryService() {
         const val PLAYLISTS = "playlists"
         const val ALBUMS = "albums"
         const val ARTISTS = "artists"
+        const val ON_PHONE = "on-phone"
     }
 }
