@@ -178,7 +178,8 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth()) {
                 Text(formatDuration((pos * dur / 1000).toInt()), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
-                if (t.isCatalog) Text("Apple Music", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                if (s.remote != null) Text("Sur ${s.remote}", color = Color(0xFFD6BCFA), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                else if (t.isCatalog) Text("Apple Music", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
                 Text("-" + formatDuration(((dur - pos * dur) / 1000).toInt()), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
             }

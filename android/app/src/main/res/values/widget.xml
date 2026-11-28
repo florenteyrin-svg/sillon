@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="widget_radius">22dp</dimen>
+    <dimen name="widget_art_radius">10dp</dimen>
+    <string name="widget_play">Lecture</string>
+    <string name="widget_pause">Pause</string>
+    <string name="widget_previous">Précédent</string>
+    <string name="widget_next">Suivant</string>
+    <string name="widget_play_album">Album à la suite</string>
+    <string name="widget_play_artist">Artiste à la suite</string>
+    <string name="widget_vinyl_description">Un disque qui tourne pendant la lecture, avec la progression et les commandes</string>
+</resources>

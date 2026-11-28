@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Live spectrum of the vinyl widget: Android's Visualizer requires it, even for the app's own audio -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
         android:name=".SillonApp"
@@ -43,7 +46,8 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
-        <receiver android:name=".player.Widget$Receiver" android:exported="false">
+        <provider android:name=".widget.FrameProvider" android:authorities="app.sillon" android:exported="true" />
+        <receiver android:name=".player.Widget$Receiver" android:exported="false" android:label="Sillon vinyle">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>

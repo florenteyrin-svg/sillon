@@ -65,7 +65,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         if (Build.VERSION.SDK_INT >= 33) {
-            registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.POST_NOTIFICATIONS)
+            registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+                .launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.RECORD_AUDIO))
         }
         val app = application as SillonApp
         setContent {
@@ -75,7 +76,7 @@ class MainActivity : ComponentActivity() {
                     if (!signedIn) {
                         LoginScreen(app) { signedIn = true }
                     } else {
-                        val player = remember { connection ?: PlayerConnection(this, app.api).also { connection = it } }
+                        val player = remember { connection ?: PlayerConnection(this, app.api, app.musicAssistant).also { connection = it } }
                         MainScaffold(app, player)
                     }
                 }

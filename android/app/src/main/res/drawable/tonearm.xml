@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- S-shaped tonearm, as in the mockup -->
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="70dp" android:height="130dp" android:viewportWidth="110" android:viewportHeight="200">
-  <path android:fillColor="#FFD4D4D8" android:pathData="M80,22m-16,0a16,16 0,1 1,32 0a16,16 0,1 1,-32 0"/>
-  <path android:fillColor="#FF71717A" android:pathData="M80,22m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0"/>
-  <path android:strokeColor="#FFE4E4E7" android:strokeWidth="5" android:strokeLineCap="round" android:fillColor="#00000000"
-      android:pathData="M80,22 C84,70 40,80 46,120 S30,160 22,172"/>
-  <path android:fillColor="#FFA1A1AA" android:pathData="M9,163 L28,172 L22,184 L3,175 Z"/>
-</vector>

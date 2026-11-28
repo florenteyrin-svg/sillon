@@ -31,10 +31,11 @@ data class PlayerState(
     val index: Int = 0,
     val shuffle: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
+    val remote: String? = null, // Music Assistant player the music was sent to
 )
 
 /** The app's link to the playback service: commands in, player state out. */
-class PlayerConnection(context: Context, private val api: SillonApi) {
+class PlayerConnection(context: Context, private val api: SillonApi, private val ma: app.sillon.data.MusicAssistant? = null) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var controller: MediaController? = null
     private val _state = MutableStateFlow(PlayerState())
@@ -57,6 +58,33 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
                 if (controller?.isPlaying == true) refresh()
             }
         }
+        // Remote: while the music plays on Music Assistant, the app shows (and follows) what it plays
+        scope.launch {
+            while (true) {
+                delay(2000)
+                val p = MaState.activePlayer ?: continue
+                val now = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { ma?.nowPlaying(p.id) } }.getOrNull() ?: continue
+                remotePlaying = now.playing
+                remotePositionMs = (now.positionSec * 1000).toLong()
+                val c = controller
+                if (c != null) {
+                    val idx = (0 until c.mediaItemCount).firstOrNull { c.getMediaItemAt(it).mediaId == now.songId }
+                    if (idx != null && idx != c.currentMediaItemIndex) c.seekTo(idx, remotePositionMs)
+                    if (c.isPlaying) c.pause()
+                }
+                refresh()
+            }
+        }
+    }
+
+    private var remotePlaying = false
+    private var remotePositionMs = 0L
+
+    private fun remote(block: suspend (app.sillon.data.MusicAssistant, String) -> Unit): Boolean {
+        val p = MaState.activePlayer ?: return false
+        val m = ma ?: return false
+        scope.launch { runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block(m, p.id) } } }
+        return true
     }
 
     private fun refresh() {
@@ -75,7 +103,10 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
             index = index,
             shuffle = c.shuffleModeEnabled,
             repeatMode = c.repeatMode,
-        )
+        ).let { st ->
+            val p = MaState.activePlayer
+            if (p == null) st else st.copy(remote = p.name, isPlaying = remotePlaying, isBuffering = false, positionMs = remotePositionMs)
+        }
     }
 
     fun play(tracks: List<QueueTrack>, start: Int = 0, shuffle: Boolean = false) {
@@ -100,6 +131,7 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
     }
 
     fun toggle() {
+        if (remote { m, id -> m.command(id, "play_pause"); remotePlaying = !remotePlaying }) return
         val c = controller ?: return
         if (c.isPlaying) c.pause() else {
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
@@ -128,9 +160,12 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
         c.play()
     }
 
-    fun next() { controller?.seekToNextMediaItem() }
-    fun previous() { controller?.seekToPrevious() }
-    fun seekTo(ms: Long) { controller?.seekTo(ms); refresh() }
+    fun next() { if (!remote { m, id -> m.command(id, "next") }) controller?.seekToNextMediaItem() }
+    fun previous() { if (!remote { m, id -> m.command(id, "previous") }) controller?.seekToPrevious() }
+    fun seekTo(ms: Long) {
+        if (remote { m, id -> m.seek(id, ms / 1000); remotePositionMs = ms }) return
+        controller?.seekTo(ms); refresh()
+    }
     /** [index] counts songs only (DJ transitions are skipped). */
     fun skipTo(index: Int) {
         val c = controller ?: return

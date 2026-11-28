@@ -101,6 +101,10 @@ class MusicAssistant(private val settings: Settings, private val http: OkHttpCli
         c.call("players/cmd/$name", buildJsonObject { put("player_id", playerId) })
     }
 
+    suspend fun seek(playerId: String, seconds: Long) = session { c ->
+        c.call("players/cmd/seek", buildJsonObject { put("player_id", playerId); put("position", seconds) })
+    }
+
     suspend fun nowPlaying(playerId: String): MaNowPlaying? = session { c ->
         val q = c.call("player_queues/get", buildJsonObject { put("queue_id", playerId) }) as? JsonObject ?: return@session null
         val item = q["current_item"] as? JsonObject
