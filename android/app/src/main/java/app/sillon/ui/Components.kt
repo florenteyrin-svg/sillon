@@ -62,6 +62,17 @@ fun Artwork(url: String?, modifier: Modifier = Modifier, corner: Dp = 10.dp) {
 private fun NoteIcon() = Icon(Icons.Filled.MusicNote, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
 
 /** HI-RES / CD / ATMOS / MP3 logo. */
+/**
+ * Quality is shown by the colour of the title, not by a logo: gold for Hi-Res, the normal colour (white on
+ * the dark theme) for CD, a dimmed grey for MP3 and other lossy files.
+ */
+@Composable
+fun qualityColor(quality: String?, normal: Color = MaterialTheme.colorScheme.onSurface): Color = when (quality) {
+    "hires", "atmos" -> HiResGold
+    "lossy" -> normal.copy(alpha = 0.55f)
+    else -> normal
+}
+
 @Composable
 fun QualityBadge(quality: String?, onDark: Boolean = false, large: Boolean = false) {
     val (label, bg, fg) = when (quality) {
@@ -100,8 +111,7 @@ fun AlbumTile(title: String, subtitle: String?, artUrl: String?, quality: String
         Artwork(artUrl, Modifier.fillMaxWidth().aspectRatio(1f))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-            if (quality == "hires" || quality == "atmos") QualityBadge(quality)
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false), color = qualityColor(quality))
         }
         if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -137,10 +147,9 @@ fun TrackRow(
             }
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, color = if (playing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                    overflow = TextOverflow.Ellipsis, color = if (playing) MaterialTheme.colorScheme.primary else qualityColor(quality))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (onPhone) Icon(Icons.Filled.PhoneAndroid, "Sur le téléphone", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
-                    if (quality == "hires" || quality == "atmos") QualityBadge(quality)
                     Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }

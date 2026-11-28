@@ -290,11 +290,10 @@ fun AlbumScreen(id: String) {
                 AlbumCover(ctx.api.coverUrl(a.id, 800), if (a.animatedCover) ctx.api.animatedCoverUrl(a.id) else null,
                     Modifier.fillMaxWidth().aspectRatioSquare())
                 Spacer(Modifier.height(14.dp))
-                Text(a.name, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+                Text(a.name, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center, color = qualityColor(a.quality))
                 Text(a.artist, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(top = 2.dp).clickableNoRipple { ctx.openArtist(a.artistId) })
                 Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    QualityBadge(a.quality)
                     Text(listOfNotNull(a.year.takeIf { it > 0 }?.toString(), "${a.songCount} titres", formatDuration(a.duration)).joinToString(" · "),
                         color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                     // Favourite album (not its songs): listed in "Albums préférés" and first in Android Auto
@@ -311,7 +310,7 @@ fun AlbumScreen(id: String) {
             PlayButtons(onPlay = { ctx.play(a.song.map { it.toQueueTrack() }) }, onShuffle = { ctx.play(a.song.map { it.toQueueTrack() }, shuffle = true) })
         }
         itemsIndexed(a.song, key = { _, s -> s.id }) { i, s ->
-            TrackRow(s.title, if (s.artist != a.artist) s.artist else formatDuration(s.duration), null, s.quality.takeIf { it != a.quality },
+            TrackRow(s.title, if (s.artist != a.artist) s.artist else formatDuration(s.duration), null, s.quality,
                 number = s.track, playing = player.current?.id == s.id, onPhone = app.sillon.data.Offline.has(s.id)) { ctx.play(a.song.map { it.toQueueTrack() }, i) }
         }
     }

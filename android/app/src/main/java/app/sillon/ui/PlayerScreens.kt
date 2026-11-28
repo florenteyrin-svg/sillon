@@ -94,11 +94,10 @@ fun MiniPlayer() {
     ) {
         Artwork(artFor(ctx, t, 150), Modifier.size(44.dp), corner = 8.dp)
         Column(Modifier.weight(1f)) {
-            Text(t.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(t.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, color = qualityColor(t.quality))
             Text(if (t.isCatalog) "${t.artist} · Apple Music" else t.artist, style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        QualityBadge(t.quality)
         if (s.isBuffering && !s.isPlaying) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
         IconButton(onClick = { ctx.player.toggle() }) {
             Icon(if (s.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (s.isPlaying) "Pause" else "Lecture")
@@ -178,12 +177,11 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     // Title: the album; artist: the artist page. Nothing here changes the song playing.
-                    Text(t.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    Text(t.title, color = qualityColor(t.quality, Color.White), fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.clickableNoRipple { ctx.showAlbumOf(t) })
                     Text(t.artist, color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.clickableNoRipple { ctx.showArtistOf(t) })
                 }
-                QualityBadge(t.quality, onDark = true, large = true)
                 if (!t.isCatalog) {
                     val fav = t.id in ctx.favorites.value
                     IconButton(onClick = { ctx.toggleFavorite(t.id) }) {

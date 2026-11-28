@@ -76,9 +76,8 @@ fun HomeScreen() {
                 ) {
                     Artwork(current.artwork ?: api.coverUrl(current.albumId.ifEmpty { current.id }, 300), Modifier.size(84.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(current.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(current.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, color = qualityColor(current.quality))
                         Text(current.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        QualityBadge(current.quality)
                         if (player.durationMs > 0) {
                             LinearProgressIndicator(
                                 progress = { (player.positionMs.toFloat() / player.durationMs).coerceIn(0f, 1f) },
