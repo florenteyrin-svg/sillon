@@ -101,6 +101,7 @@ fun LibraryScreen() {
             NavRow("Titres") { ctx.nav.navigate("songs") }
             NavRow("Favoris") { ctx.openPlaylist(app.sillon.data.FAVORITES_ID) }
             NavRow("Albums préférés") { ctx.nav.navigate("favorite-albums") }
+            NavRow("Sur le téléphone") { ctx.nav.navigate("offline") }
             NavRow("Importer mes favoris Jellyfin") { showImport = true }
             Spacer(Modifier.height(16.dp))
             SectionTitle("Ajoutés récemment")
@@ -204,6 +205,27 @@ private fun CoroutineScope.launchShuffleAll(ctx: AppContext) {
     }
 }
 
+/** Songs kept on the phone: they play without network. */
+@Composable
+fun OfflineScreen() {
+    val ctx = LocalApp.current
+    val list = app.sillon.data.Offline.tracks.values.toList().reversed()
+    val waiting = app.sillon.data.Offline.pending.size
+    val mb = remember(list.size) { app.sillon.data.Offline.bytesUsed() / (1024 * 1024) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+        item {
+            BackBar()
+            ScreenTitle("Sur le téléphone", "${list.size} titres · ${if (mb >= 1024) "%.1f Go".format(mb / 1024f) else "$mb Mo"}" +
+                (if (waiting > 0) " · $waiting en cours" else ""))
+            if (list.isNotEmpty()) PlayButtons(onPlay = { ctx.play(list) }, onShuffle = { ctx.play(list, shuffle = true) })
+        }
+        if (list.isEmpty()) item { Message("Touche le téléphone entouré sur un album, une playlist ou dans le lecteur pour garder des titres sans réseau") }
+        itemsIndexed(list, key = { _, t -> t.id }) { i, t ->
+            TrackRow(t.title, t.artist, ctx.api.coverUrl(t.albumId.ifEmpty { t.id }, 150), t.quality, onPhone = true) { ctx.play(list, i) }
+        }
+    }
+}
+
 @Composable
 fun FavoriteAlbumsScreen() {
     val ctx = LocalApp.current
@@ -257,6 +279,7 @@ fun AlbumScreen(id: String) {
                     Text(listOfNotNull(a.year.takeIf { it > 0 }?.toString(), "${a.songCount} titres", formatDuration(a.duration)).joinToString(" · "),
                         color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                     // Favourite album (not its songs): listed in "Albums préférés" and first in Android Auto
+                    OfflineButton(a.song.map { it.toQueueTrack() }, "L'album")
                     val fav = a.id in ctx.favoriteAlbums.value
                     IconButton(onClick = { ctx.toggleFavoriteAlbum(a.id) }) {
                         Icon(if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
@@ -270,7 +293,7 @@ fun AlbumScreen(id: String) {
         }
         itemsIndexed(a.song, key = { _, s -> s.id }) { i, s ->
             TrackRow(s.title, if (s.artist != a.artist) s.artist else formatDuration(s.duration), null, s.quality.takeIf { it != a.quality },
-                number = s.track, playing = player.current?.id == s.id) { ctx.play(a.song.map { it.toQueueTrack() }, i) }
+                number = s.track, playing = player.current?.id == s.id, onPhone = app.sillon.data.Offline.has(s.id)) { ctx.play(a.song.map { it.toQueueTrack() }, i) }
         }
     }
 }
@@ -321,14 +344,17 @@ fun PlaylistScreen(id: String) {
                 Artwork(ctx.api.coverUrl(p.id, 800), Modifier.fillMaxWidth().aspectRatioSquare(), corner = 12.dp)
                 Spacer(Modifier.height(14.dp))
                 Text(p.name, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
-                Text((if (p.smart) "Playlist intelligente · " else "") + "${p.entry.size} titres · ${formatDuration(p.duration)}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text((if (p.smart) "Playlist intelligente · " else "") + "${p.entry.size} titres · ${formatDuration(p.duration)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OfflineButton(p.entry.map { it.toQueueTrack() }, "La playlist")
+                }
             }
             PlayButtons(onPlay = { ctx.play(p.entry.map { it.toQueueTrack() }, mixable = true) },
                 onShuffle = { ctx.play(p.entry.map { it.toQueueTrack() }, shuffle = true, mixable = true) })
         }
         itemsIndexed(p.entry, key = { i, s -> "$i-${s.id}" }) { i, s ->
-            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(p.entry.map { it.toQueueTrack() }, i, mixable = true) }
+            TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality, onPhone = app.sillon.data.Offline.has(s.id)) { ctx.play(p.entry.map { it.toQueueTrack() }, i, mixable = true) }
         }
     }
 }

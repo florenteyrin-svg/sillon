@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
@@ -174,8 +175,11 @@ fun CatalogAlbumScreen(id: String) {
                 },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp), shape = RoundedCornerShape(12.dp),
             ) {
+                if (albumState == DownloadState.None) {
+                    Icon(androidx.compose.material.icons.Icons.Outlined.Dns, null, modifier = Modifier.padding(end = 8.dp))
+                }
                 Text(when (albumState) {
-                    DownloadState.None -> "Télécharger l'album dans ma bibliothèque"
+                    DownloadState.None -> "Télécharger l'album sur le serveur"
                     DownloadState.Pending -> "Téléchargement en cours…"
                     DownloadState.InLibrary -> "Déjà dans ma bibliothèque"
                 })

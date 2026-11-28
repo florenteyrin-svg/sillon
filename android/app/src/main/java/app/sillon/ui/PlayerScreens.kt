@@ -252,6 +252,7 @@ fun NowPlayingScreen(onClose: () -> Unit) {
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) { Icon(Icons.Filled.KeyboardArrowDown, "Fermer", tint = Color.White, modifier = Modifier.size(32.dp)) }
             Spacer(Modifier.weight(1f))
+            s.current?.takeIf { !it.isCatalog }?.let { OfflineButton(listOf(it), "Ce titre", tint = Color.White) }
             IconButton(onClick = { showOutput = true }) { Icon(Icons.Filled.Cast, "Écouter sur Music Assistant", tint = Color.White) }
             IconButton(onClick = { showQueue = !showQueue }) {
                 Icon(Icons.AutoMirrored.Filled.QueueMusic, "File d'attente", tint = if (showQueue) MaterialTheme.colorScheme.primary else Color.White)

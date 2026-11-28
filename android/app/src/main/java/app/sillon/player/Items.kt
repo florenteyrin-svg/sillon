@@ -71,7 +71,8 @@ fun QueueTrack.toMediaItem(api: SillonApi): MediaItem {
         .setIsBrowsable(false)
         .setExtras(extras)
         .build()
-    val uri = if (isCatalog) api.catalogStreamUrl(appleId, albumId) else api.streamUrl(id)
+    // A song kept on the phone plays from the phone, with or without network
+    val uri = if (isCatalog) api.catalogStreamUrl(appleId, albumId) else app.sillon.data.Offline.uri(id) ?: api.streamUrl(id)
     return MediaItem.Builder().setMediaId(id).setUri(uri).setMediaMetadata(meta).build()
 }
 

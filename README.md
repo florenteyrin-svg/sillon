@@ -87,6 +87,8 @@ L'appli est dans [`android/`](android/) (Kotlin, Jetpack Compose, Media3) :
 - **Toujours prête** : la file d'attente et la position sont gardées sur le téléphone et rechargées avant
   tout le reste, donc rien à charger en ouvrant l'appli ou en montant en voiture.
 - **Android Auto** : Récents, Playlists, Albums (tes albums préférés en premier), Artistes, recherche et commande vocale.
+- **Hors ligne** : le téléphone entouré (album, playlist, lecteur) garde les titres sur le téléphone, même qualité,
+  lus sans réseau (Bibliothèque › Sur le téléphone). Côté Apple Music, le logo serveur télécharge dans ta bibliothèque.
 - **Albums préférés** : un cœur sur la page d'un album (indépendant des titres favoris).
 - Lit FLAC, ALAC, MP3, AAC, Opus, WAV… (décodeurs FFmpeg intégrés).
 
