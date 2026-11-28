@@ -156,7 +156,7 @@ fun CatalogAlbumScreen(id: String) {
             artworkTemplate = it.artworkTemplate ?: a.artworkTemplate) }
         item {
             Column(Modifier.fillMaxWidth().padding(horizontal = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Artwork(appleArtwork(a.artworkTemplate, 800), Modifier.fillMaxWidth().aspectRatioSquare(), corner = 12.dp)
+                AlbumCover(appleArtwork(a.artworkTemplate, 800), a.animatedVideo, Modifier.fillMaxWidth().aspectRatioSquare())
                 Spacer(Modifier.height(14.dp))
                 Text(a.name, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
                 Text(a.artistName, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium)

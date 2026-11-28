@@ -47,6 +47,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -139,6 +140,18 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             ) {
                 if (art != null) AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 if (t != null && t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
+                // Apple Music song: the animated cover of its album on Apple Music
+                if (t != null && t.isCatalog && t.albumId.isNotEmpty()) {
+                    var video by remember(t.albumId) { mutableStateOf(catalogVideos[t.albumId]) }
+                    LaunchedEffect(t.albumId) {
+                        if (video == null) runCatching { ctx.api.catalogAlbum(t.albumId) }.onSuccess {
+                            val v = it?.animatedVideo.orEmpty()
+                            catalogVideos[t.albumId] = v
+                            video = v
+                        }
+                    }
+                    video?.takeIf { it.isNotEmpty() }?.let { AnimatedCover(it) }
+                }
                 // The cover opens the album, like Apple Music
                 if (t != null) Box(Modifier.fillMaxSize().clickableNoRipple { ctx.showAlbumOf(t) })
             }
@@ -248,9 +261,21 @@ fun NowPlayingScreen(onClose: () -> Unit) {
     }
 }
 
+/** An album's still cover, with its animated cover playing over it when there is one (library or Apple Music). */
+@Composable
+fun AlbumCover(art: String?, animated: String?, modifier: Modifier) {
+    Box(modifier.clip(RoundedCornerShape(12.dp))) {
+        Artwork(art, Modifier.fillMaxSize(), corner = 12.dp)
+        if (animated != null) AnimatedCover(animated)
+    }
+}
+
+/** Apple's animated covers of the albums seen, by Apple album id ("" when there is none). */
+private val catalogVideos = HashMap<String, String>()
+
 @OptIn(UnstableApi::class)
 @Composable
-private fun AnimatedCover(url: String) {
+fun AnimatedCover(url: String) {
     val context = LocalContext.current
     val ctx = LocalApp.current
     val exo = remember(url) {

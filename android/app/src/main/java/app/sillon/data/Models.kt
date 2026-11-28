@@ -95,6 +95,7 @@ data class CatalogAlbum(
     val inLibrary: Boolean = false,
     val libraryId: String? = null,
     val tracks: List<CatalogSong> = emptyList(),
+    val animatedVideo: String? = null, // Apple's animated cover (HLS), when the album has one
 )
 
 @Serializable

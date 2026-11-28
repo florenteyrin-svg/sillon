@@ -225,7 +225,8 @@ fun AlbumScreen(id: String) {
         val a = album ?: run { item { Message("Chargement…") }; return@LazyColumn }
         item {
             Column(Modifier.fillMaxWidth().padding(horizontal = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Artwork(ctx.api.coverUrl(a.id, 800), Modifier.fillMaxWidth().aspectRatioSquare(), corner = 12.dp)
+                AlbumCover(ctx.api.coverUrl(a.id, 800), if (a.animatedCover) ctx.api.animatedCoverUrl(a.id) else null,
+                    Modifier.fillMaxWidth().aspectRatioSquare())
                 Spacer(Modifier.height(14.dp))
                 Text(a.name, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
                 Text(a.artist, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium,

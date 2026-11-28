@@ -22,3 +22,6 @@
   - file à part (un clip à la fois), demande le media-user-token
   - Dockerfile : ajout de mp4decrypt (Bento4), nécessaire à amdp pour les clips
   - code : backend/lib/clips.mjs, backend/routes/clips.mjs, frontend/src/pages/Clips.tsx
+
+- **Pochette animée dans la fiche album** (pour Sillon) : `GET /api/album/:id` renvoie aussi
+  `album.animatedVideo`, l'adresse de la pochette animée d'Apple (playlist HLS), ou `null`.
