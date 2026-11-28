@@ -98,6 +98,7 @@ class PlaybackService : MediaLibraryService() {
             ))
             .build()
         Widget.attach(this, player, api, scope)
+        watchNetwork()
         setMediaNotificationProvider(DefaultMediaNotificationProvider.Builder(this).build().apply {
             setSmallIcon(R.drawable.ic_notification)
         })
@@ -240,6 +241,24 @@ class PlaybackService : MediaLibraryService() {
 
     // ---- without network: what is on the phone ----
 
+    /** Network lost or back: Android Auto reloads its tabs, so it shows everything again, or only the phone's songs. */
+    private fun watchNetwork() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        var wasOffline = offline()
+        val refresh = Runnable {
+            val now = offline()
+            if (now != wasOffline) {
+                wasOffline = now
+                if (!now) serverDownAt = 0L
+                listOf(RECENT, PLAYLISTS, ALBUMS, ARTISTS).forEach { session.notifyChildrenChanged(it, Int.MAX_VALUE, null) }
+            }
+        }
+        cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) { handler.post(refresh) }
+            override fun onLost(network: android.net.Network) { handler.postDelayed(refresh, 500) }
+        })
+    }
+
     private val cache get() = (application as SillonApp).cache
     private var serverDownAt = 0L
 
@@ -261,22 +280,22 @@ class PlaybackService : MediaLibraryService() {
 
     private fun phoneSongs(): List<QueueTrack> = app.sillon.data.Offline.tracks.values.toList()
 
-    private fun phoneEntry(): MediaItem? = phoneSongs().takeIf { it.isNotEmpty() }?.let {
-        browsable(ON_PHONE, "Sur le téléphone", "${it.size} titres · sans réseau", null, MediaMetadata.MEDIA_TYPE_PLAYLIST)
-    }
 
-    /** Songs on the phone only, arranged like the usual tabs; playlists seen before keep their songs that are on the phone. */
+    /**
+     * Without network, Android Auto shows only what is on the phone, in the usual tabs (no special entry):
+     * Récents = the songs on the phone, playlists seen before with their songs on the phone, their albums and artists.
+     */
     private suspend fun offlineChildren(parentId: String): List<MediaItem> {
         val songs = phoneSongs()
         return when {
             parentId == ROOT -> onlineChildren(ROOT)
             parentId == RECENT || parentId == ON_PHONE -> playable(parentId, songs.reversed())
-            parentId == PLAYLISTS -> listOfNotNull(phoneEntry()) +
+            parentId == PLAYLISTS ->
                 cache.read("home-playlists", kotlinx.serialization.builtins.ListSerializer(app.sillon.data.Playlist.serializer())).orEmpty()
                     .mapNotNull { pl ->
                         val n = cache.read("playlist-${pl.id}", app.sillon.data.Playlist.serializer())?.entry
                             ?.count { app.sillon.data.Offline.has(it.id) } ?: 0
-                        if (n == 0) null else browsable("pl:${pl.id}", pl.name, "$n titres sur le téléphone", api.coverUrl(pl.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
+                        if (n == 0) null else browsable("pl:${pl.id}", pl.name, "$n titres", api.coverUrl(pl.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
                     }
             parentId == ALBUMS -> songs.groupBy { it.albumId }.filterKeys { it.isNotEmpty() }.map { (id, list) ->
                 browsable("al:$id", list.first().album, list.first().artist, api.coverUrl(id, 300), MediaMetadata.MEDIA_TYPE_ALBUM)
@@ -313,8 +332,7 @@ class PlaybackService : MediaLibraryService() {
                 appleArtwork(it.artwork), it.duration.toInt())
             else QueueTrack(it.id, it.title, it.artist, it.album, it.albumId ?: "", null, it.duration.toInt(), it.quality ?: "")
         })
-        // "Sur le téléphone" first when songs are kept on the phone
-        parentId == PLAYLISTS -> listOfNotNull(phoneEntry()) + api.playlists().also {
+        parentId == PLAYLISTS -> api.playlists().also {
             cache.write("home-playlists", kotlinx.serialization.builtins.ListSerializer(app.sillon.data.Playlist.serializer()), it)
         }.map {
             browsable("pl:${it.id}", it.name, "${it.songCount} titres", api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
