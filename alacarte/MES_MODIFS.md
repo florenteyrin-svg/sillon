@@ -25,3 +25,5 @@
 
 - **Pochette animée dans la fiche album** (pour Sillon) : `GET /api/album/:id` renvoie aussi
   `album.animatedVideo`, l'adresse de la pochette animée d'Apple (playlist HLS), ou `null`.
+- **Photo des artistes dans la recherche** (pour Sillon) : `GET /api/search` renvoie aussi
+  `artworkTemplate` pour chaque artiste.

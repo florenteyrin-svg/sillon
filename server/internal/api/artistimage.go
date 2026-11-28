@@ -30,7 +30,7 @@ func (a *API) artistImage(w http.ResponseWriter, r *http.Request, u *db.User) {
 		return
 	}
 	dir := filepath.Join(a.Subsonic.DataDir, "artists")
-	img, none := filepath.Join(dir, id+".jpg"), filepath.Join(dir, id+".none")
+	img, none := filepath.Join(dir, id+".jpg"), filepath.Join(dir, id+".nophoto")
 	m, _ := artistImageLocks.LoadOrStore(id, &sync.Mutex{})
 	m.(*sync.Mutex).Lock()
 	defer m.(*sync.Mutex).Unlock()
@@ -75,9 +75,9 @@ func (a *API) fetchArtistImage(id, dir, dest string) error {
 		if fold(name) != want {
 			continue
 		}
-		if u, _ := m["artworkUrlLarge"].(string); u != "" {
-			url = u
-		} else if u, _ := m["artworkUrl"].(string); u != "" {
+		if t, _ := m["artworkTemplate"].(string); t != "" { // Apple: ".../{w}x{h}bb.{f}"
+			url = strings.NewReplacer("{w}", "1400", "{h}", "1400", "{f}", "jpg", "{c}", "").Replace(t)
+		} else if u, _ := m["artworkUrlLarge"].(string); u != "" {
 			url = u
 		}
 		break

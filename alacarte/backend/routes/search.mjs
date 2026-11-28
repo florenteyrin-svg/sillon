@@ -221,6 +221,7 @@ searchRouter.get('/', async (req, res) => {
       name: x.attributes?.name,
       genreNames: x.attributes?.genreNames || [],
       url: x.attributes?.url,
+      artworkTemplate: x.attributes?.artwork?.url || null, // Sillon : photo de l'artiste
     }))
 
     rememberArtistNames(storefront, artists)

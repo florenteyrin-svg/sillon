@@ -34,7 +34,7 @@ import kotlinx.coroutines.withContext
 /**
  * Vinyl home screen widget (the one from the Finamp fork): the record and the album art turn while music plays
  * (108 pre-rotated frames, 60 fps), the arm follows the song, live spectrum behind the title, progress,
- * quality logo, previous / play / next, Album and Artist.
+ * previous / play / next, Album and Artist.
  */
 object Widget {
     private const val ACTION = "app.sillon.widget.ACTION"
@@ -91,14 +91,7 @@ object Widget {
         }
         v.setChronometer(R.id.widget_elapsed, SystemClock.elapsedRealtime() - position, null, playing)
 
-        val logo = when (meta?.extras?.getString(Extras.QUALITY)) {
-            "hires", "atmos" -> R.drawable.widget_quality_hires
-            "cd" -> R.drawable.widget_quality_cd
-            "lossy" -> R.drawable.widget_quality_mp3
-            else -> null
-        }
-        v.setViewVisibility(R.id.widget_quality, if (logo != null) View.VISIBLE else View.GONE)
-        if (logo != null) v.setImageViewResource(R.id.widget_quality, logo)
+        v.setViewVisibility(R.id.widget_quality, View.GONE) // no quality logo on the widget
 
         // The card takes a dark colour from the album art (it is drawn white and tinted here)
         // Only the art of THIS song: never the previous one while the new one loads
