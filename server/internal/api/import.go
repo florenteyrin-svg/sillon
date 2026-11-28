@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -26,10 +28,15 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 		jsonError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	idx, err := a.songIndex()
+	if err != nil {
+		jsonError(w, 500, err.Error())
+		return
+	}
 	var ids, missing []string
 	for i := len(songs) - 1; i >= 0; i-- { // oldest first, so the last favourite ends up on top
 		s := songs[i]
-		if id := a.matchSong(s); id != "" {
+		if id := a.matchSong(s, idx); id != "" {
 			ids = append(ids, id)
 		} else {
 			missing = append(missing, firstArtist(s)+" — "+s.Name)
@@ -42,9 +49,10 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 		}
 	}
 	log.Printf("jellyfin: %d favourites, %d found in the library", len(songs), len(ids))
-	if len(missing) > 30 {
-		missing = missing[:30]
+	for _, m := range missing {
+		log.Printf("jellyfin: not found: %s", m)
 	}
+	sort.Strings(missing)
 	writeJSON(w, map[string]any{"total": len(songs), "imported": len(ids), "missing": missing})
 }
 
@@ -55,9 +63,32 @@ func firstArtist(s jellyfin.Song) string {
 	return s.AlbumArtist
 }
 
-// matchSong finds the library song for a Jellyfin favourite.
-func (a *API) matchSong(s jellyfin.Song) string {
-	// Same file: Jellyfin's path ends with the path inside the music folder
+type libSong struct{ id, artists, album string }
+
+// songIndex lists the library songs by title, written loosely (see core).
+func (a *API) songIndex() (map[string][]libSong, error) {
+	rows, err := a.DB.Query(`SELECT id, title, artist, album_artist, album FROM tracks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	idx := map[string][]libSong{}
+	for rows.Next() {
+		var id, title, ar, aa, al string
+		if rows.Scan(&id, &title, &ar, &aa, &al) != nil {
+			continue
+		}
+		ls := libSong{id, artistKey(ar) + "|" + artistKey(aa) + "|" + fold(title), fold(al)}
+		for _, k := range uniq(fold(title), core(title)) {
+			idx[k] = append(idx[k], ls)
+		}
+	}
+	return idx, nil
+}
+
+// matchSong finds the library song for a Jellyfin favourite: same file first, then same title (with or
+// without "(feat. …)", "(Radio Edit)"…) by the same artist.
+func (a *API) matchSong(s jellyfin.Song, idx map[string][]libSong) string {
 	parts := strings.Split(strings.ReplaceAll(s.Path, "\\", "/"), "/")
 	for i := 1; i < len(parts); i++ {
 		var id string
@@ -65,34 +96,82 @@ func (a *API) matchSong(s jellyfin.Song) string {
 			return id
 		}
 	}
-	// Otherwise same title, and the closest artist / album
-	rows, err := a.DB.Query(`SELECT id, artist, album_artist, album FROM tracks WHERE title = ? COLLATE NOCASE`, s.Name)
-	if err != nil {
-		return ""
-	}
-	defer rows.Close()
-	best, bestScore := "", 0
-	artist, album := fold(firstArtist(s)), fold(s.Album)
-	for rows.Next() {
-		var id, ar, aa, al string
-		if rows.Scan(&id, &ar, &aa, &al) != nil {
-			continue
-		}
-		score := 1
-		if fa, faa := fold(ar), fold(aa); artist != "" && (fa == artist || faa == artist || strings.Contains(fa, artist) || strings.Contains(artist, fa)) {
-			score += 2
-		}
-		if album != "" && fold(al) == album {
-			score++
-		}
-		if score > bestScore {
-			best, bestScore = id, score
+	var artists []string
+	for _, ar := range append(append([]string{}, s.Artists...), s.AlbumArtist) {
+		// "A & B", "A feat. B", "A, B": each name counts
+		for _, p := range splitArtists(ar) {
+			if k := artistKey(p); len(k) >= 2 {
+				artists = append(artists, k)
+			}
 		}
 	}
-	if bestScore >= 3 || (bestScore >= 1 && artist == "") {
-		return best
+	album := fold(s.Album)
+	for _, key := range uniq(fold(s.Name), core(s.Name)) {
+		best, bestScore := "", 0
+		for _, c := range idx[key] {
+			score := 0
+			for _, ar := range artists {
+				if strings.Contains(c.artists, ar) {
+					score = 2
+					break
+				}
+			}
+			if score == 0 && len(artists) > 0 {
+				continue
+			}
+			if album != "" && c.album == album {
+				score++
+			}
+			if score > bestScore || best == "" {
+				best, bestScore = c.id, score
+			}
+		}
+		if best != "" {
+			return best
+		}
 	}
 	return ""
+}
+
+var (
+	brackets   = regexp.MustCompile(`[\(\[][^\)\]]*[\)\]]`)
+	featTail   = regexp.MustCompile(`(?i)\s(feat\.?|ft\.?|featuring)\s.*$`)
+	artistSeps = regexp.MustCompile(`(?i)\s*(,|&|/|;|\sx\s|\sand\s|\set\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s|\swith\s)\s*`)
+)
+
+// core is a title without what is often written differently: (feat. …), [Radio Edit], " - Remastered"…
+func core(title string) string {
+	t := brackets.ReplaceAllString(title, " ")
+	t = featTail.ReplaceAllString(t, "")
+	if i := strings.Index(t, " - "); i > 0 {
+		t = t[:i]
+	}
+	if c := fold(t); c != "" {
+		return c
+	}
+	return fold(title)
+}
+
+func splitArtists(s string) []string {
+	return artistSeps.Split(s, -1)
+}
+
+// artistKey writes an artist name the same way whatever the order: "Potbelleez, The" = "The Potbelleez".
+func artistKey(s string) string {
+	f := fold(s)
+	f = strings.TrimPrefix(f, "the")
+	f = strings.TrimSuffix(f, "the")
+	return f
+}
+
+func uniq(v ...string) []string {
+	var out []string
+	for _, s := range v {
+		if s != "" && (len(out) == 0 || out[len(out)-1] != s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // fold keeps only letters and digits, in lower case, so small spelling differences do not matter.
