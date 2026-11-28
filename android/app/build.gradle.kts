@@ -79,6 +79,7 @@ dependencies {
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.8.0+1")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.5") // downloads to the phone, with a notification
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")

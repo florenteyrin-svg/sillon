@@ -203,15 +203,20 @@ fun OfflineButton(tracks: List<app.sillon.player.QueueTrack>, label: String, tin
     if (list.isEmpty()) return
     val onPhone = list.count { app.sillon.data.Offline.has(it.id) }
     val waiting = list.count { app.sillon.data.Offline.pending.containsKey(it.id) }
+    val failedHere = list.count { app.sillon.data.Offline.failed.containsKey(it.id) }
     val all = onPhone == list.size
+    // Progress counts the song downloading now byte by byte, so the ring moves even on a big Hi-Res file
+    val cur = app.sillon.data.Offline.progress.value
+    val fraction = (onPhone + (if (cur != null && list.any { it.id == cur.id }) cur.fraction else 0f)) / list.size
     var confirm by remember { mutableStateOf(false) }
     Box(Modifier.size(48.dp).clip(CircleShape).clickable {
         when {
             all -> confirm = true
-            waiting > 0 -> {}
+            waiting > 0 -> ctx.nav.navigate("offline")
             else -> {
                 app.sillon.data.Offline.download(list)
-                ctx.toast.value = "Téléchargement sur le téléphone : ${list.size - onPhone} titre(s)"
+                ctx.toast.value = (if (failedHere > 0) "Nouvel essai : " else "Téléchargement sur le téléphone : ") +
+                    "${list.size - onPhone} titre(s). Suivi dans la notification."
             }
         }
     }, contentAlignment = Alignment.Center) {
@@ -220,10 +225,11 @@ fun OfflineButton(tracks: List<app.sillon.player.QueueTrack>, label: String, tin
                 Icon(Icons.Filled.PhoneAndroid, "$label : sur le téléphone", tint = Color.White, modifier = Modifier.size(20.dp))
             }
             waiting > 0 -> {
-                CircularProgressIndicator(progress = { onPhone.toFloat() / list.size }, modifier = Modifier.size(34.dp), color = tint, strokeWidth = 2.5.dp)
+                CircularProgressIndicator(progress = { fraction }, modifier = Modifier.size(34.dp), color = tint, strokeWidth = 2.5.dp,
+                    trackColor = tint.copy(alpha = 0.25f))
                 Icon(Icons.Filled.PhoneAndroid, "Téléchargement…", tint = tint, modifier = Modifier.size(18.dp))
             }
-            else -> Box(Modifier.size(34.dp).border(2.dp, tint, CircleShape), contentAlignment = Alignment.Center) {
+            else -> Box(Modifier.size(34.dp).border(2.dp, if (failedHere > 0) Color(0xFFFF4D6D) else tint, CircleShape), contentAlignment = Alignment.Center) {
                 Icon(Icons.Filled.PhoneAndroid, "$label : télécharger sur le téléphone", tint = tint, modifier = Modifier.size(20.dp))
             }
         }

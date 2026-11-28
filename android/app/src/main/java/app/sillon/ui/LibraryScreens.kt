@@ -217,6 +217,25 @@ fun OfflineScreen() {
             BackBar()
             ScreenTitle("Sur le téléphone", "${list.size} titres · ${if (mb >= 1024) "%.1f Go".format(mb / 1024f) else "$mb Mo"}" +
                 (if (waiting > 0) " · $waiting en cours" else ""))
+            val p = app.sillon.data.Offline.progress.value
+            if (p != null || waiting > 0) Column(
+                Modifier.padding(horizontal = 20.dp, vertical = 8.dp).fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(14.dp)).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(if (p != null) "Téléchargement ${p.done + 1} / ${p.count}" else "En attente…", fontWeight = FontWeight.SemiBold)
+                if (p != null) {
+                    Text(p.title, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    androidx.compose.material3.LinearProgressIndicator(progress = { p.fraction }, modifier = Modifier.fillMaxWidth())
+                    Text(if (p.total > 0) "${p.bytes / (1024 * 1024)} / ${p.total / (1024 * 1024)} Mo" else "${p.bytes / (1024 * 1024)} Mo",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            val failed = app.sillon.data.Offline.failed.values.toList()
+            if (failed.isNotEmpty()) Row(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("${failed.size} titre(s) pas téléchargé(s) : serveur injoignable ?", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                androidx.compose.material3.TextButton(onClick = { app.sillon.data.Offline.download(failed) }) { Text("Réessayer") }
+            }
             if (list.isNotEmpty()) PlayButtons(onPlay = { ctx.play(list) }, onShuffle = { ctx.play(list, shuffle = true) })
         }
         if (list.isEmpty()) item { Message("Touche le téléphone entouré sur un album, une playlist ou dans le lecteur pour garder des titres sans réseau") }
