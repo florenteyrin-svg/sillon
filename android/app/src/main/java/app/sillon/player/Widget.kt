@@ -98,9 +98,12 @@ object Widget {
         v.setViewVisibility(R.id.widget_quality, if (logo != null) View.VISIBLE else View.GONE)
         if (logo != null) v.setImageViewResource(R.id.widget_quality, logo)
 
-        // Album art: still when paused, turning with the record while playing
+        // The card takes a dark colour from the album art (it is drawn white and tinted here)
         val a = art
-        if (a != null) v.setImageViewBitmap(R.id.widget_art, Artwork.circle(a))
+        v.setInt(R.id.widget_background, "setColorFilter", a?.let { Artwork.backgroundColor(it) } ?: Artwork.defaultBackground(context))
+
+        // Album art: still when paused, turning with the record while playing
+        if (a != null) v.setImageViewBitmap(R.id.widget_art, Artwork.circle(a)) else v.setImageViewResource(R.id.widget_art, R.drawable.widget_ic_music)
         val frames = if (playing && a != null) Artwork.rotatedLabelFiles(context, artKey ?: "", a, labelIds.size, 144) else null
         v.setViewVisibility(R.id.widget_label_spinning, if (frames != null) View.VISIBLE else View.GONE)
         v.setViewVisibility(R.id.widget_art, if (frames != null) View.GONE else View.VISIBLE)
