@@ -39,7 +39,6 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -221,18 +220,18 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 }
             }
 
-            // Album / Artist: the album in order, or all the artist's songs shuffled, right after this song
-            if (!t.isCatalog) {
-                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    QueueAfterButton("Album à la suite", Icons.Filled.Album, Modifier.weight(1f)) {
+            // Album / Artist, icons only like the small buttons under Apple Music's player: the album in order,
+            // or all the artist's songs shuffled, right after this song
+            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                if (!t.isCatalog) {
+                    IconButton(onClick = {
                         ctx.player.queueAfter("album") { ok -> ctx.toast.value = if (ok) "Album « ${t.album} » ajouté à la suite" else "Album introuvable sur le serveur" }
-                    }
-                    QueueAfterButton("Artiste à la suite", Icons.Filled.Person, Modifier.weight(1f)) {
+                    }) { Icon(Icons.Filled.Album, "Album à la suite", tint = Color.White.copy(alpha = 0.8f)) }
+                    IconButton(onClick = {
                         ctx.player.queueAfter("artist") { ok -> ctx.toast.value = if (ok) "Titres de ${t.artist} ajoutés à la suite (aléatoire)" else "Artiste introuvable sur le serveur" }
-                    }
+                    }) { Icon(Icons.Filled.Person, "Artiste à la suite", tint = Color.White.copy(alpha = 0.8f)) }
                 }
             }
-            if (t.mixable) DjButton()
             Spacer(Modifier.height(8.dp))
             }
         }
@@ -246,43 +245,6 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             }
         }
         if (showOutput) OutputSheet { showOutput = false }
-    }
-}
-
-@Composable
-private fun QueueAfterButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier, onClick: () -> Unit) {
-    Row(
-        modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.14f)).clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Icon(icon, null, tint = Color.White)
-        Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
-    }
-}
-
-@Composable
-private fun DjButton() {
-    val ctx = LocalApp.current
-    var on by remember { mutableStateOf(ctx.app.settings.djEnabled) }
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(if (on) Color(0xFF8B5CF6).copy(alpha = 0.35f) else Color.White.copy(alpha = 0.12f))
-            .clickable {
-                on = !on
-                ctx.app.settings.djEnabled = on
-                ctx.toast.value = if (on) "Mix DJ activé : les transitions se préparent sur le serveur" else "Mix DJ désactivé"
-            }
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Icon(Icons.Filled.Tune, null, tint = if (on) Color(0xFFD6BCFA) else Color.White)
-        Column(Modifier.weight(1f)) {
-            Text("Mix DJ", color = Color.White, fontWeight = FontWeight.Bold)
-            Text(if (on) "La voix passe d'un titre à l'autre, comme un DJ" else "Enchaîne les titres comme un DJ",
-                color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodyMedium)
-        }
-        androidx.compose.material3.Switch(checked = on, onCheckedChange = null)
     }
 }
 

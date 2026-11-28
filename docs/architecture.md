@@ -62,8 +62,6 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 | POST | `/api/catalog/play` | Écoute directe d'un titre Apple Music `{"id","albumId","title","artist","album","artwork","duration"}` → `{"url"}` |
 | GET | `/api/catalog/stream/{id}` | Le son du titre (MP4/ALAC), envoyé pendant qu'il se télécharge, puis depuis le cache |
 | GET | `/api/recent` | Récemment écoutés : titres de la bibliothèque et du catalogue mélangés |
-| GET | `/api/mix/transition?from=&to=` | Passage Mix DJ entre deux titres : `{"status","aOut","bIn","url","style"}` |
-| GET | `/api/mix/file/{key}` | Le passage (FLAC) |
 | GET/POST | `/api/smart-playlists` | Liste / création `{"name","rules"}` |
 | PUT | `/api/smart-playlists/{id}` | Modification |
 | POST | `/api/smart-playlists/preview` | Nombre de titres d'un jeu de règles |
@@ -104,45 +102,3 @@ Basic, ou paramètres `u`/`p` (ou `t`/`s`).
 4. Le cache garde sa taille sous `SILLON_CACHE_MAX_GB` (10 Go) : les titres écoutés le moins récemment
    partent en premier. Télécharger un titre avec la flèche le retire du cache.
 
-## Mix DJ
-
-Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband).
-
-1. L'appli demande `GET /api/mix/transition?from=&to=` pour les titres à venir ; Sillon transmet au
-   conteneur DJ, qui calcule en tâche de fond ; l'appli redemande jusqu'à `done`.
-2. Seules la fin de A (~75 s) et le début de B (~75 s) sont traités, sur le modèle d'AutoMix (Apple),
-   de Spotify Mix et des règles de DJ relevées par Zehren et al. (Computer Music Journal, 2022) :
-   - grille de battements au centième de BPM, premiers temps de mesure, tonalité (roue de Camelot),
-     énergie et harmonie par blocs de 4 mesures ;
-   - **A** : la transition commence au début de son outro (bloc de 4 mesures où l'énergie baisse et
-     l'harmonie change), en coupant au plus 8 mesures de A ;
-   - **B** : placé pour que sa première partie forte (plus forte hausse d'énergie de ses 32 premières
-     mesures) arrive pile à la fin de la transition ;
-   - **8 mesures** (comme le maximum de Spotify Mix), **4** si les tonalités ne vont pas ensemble ;
-   - calage battement par battement, légère rampe de tempo de A vers B (étirement rubberband R2, hauteur
-     conservée) ;
-   - **mix à l'égaliseur** comme un DJ : les aigus de B montent sur la 1re moitié, les basses s'échangent
-     sur le premier temps du milieu, les aigus de A s'effacent sur la 2e moitié. Pas de séparation des
-     sources : rapide (~10 s par transition sur processeur) et chaque titre garde son son ;
-   - tempos à plus de 8 % (après regroupement double/demi temps) ou rythme non régulier : fondu de 6 s
-     entre la vraie fin de A et le vrai début de B, comme AutoMix (`SILLON_DJ_MAX_TEMPO_RATIO` pour changer) ;
-   - début = son exact de A, fin = son exact de B (fondus de 50 ms dans l'original).
-3. **Segments** : `GET /api/mix/segment?song=&prev=&next=` rend un titre du mix en UN fichier continu :
-   [passage depuis prev] + le titre jusqu'au point exact où commence le passage vers next (44,1 kHz /
-   24 bits pour tous). Le téléphone enchaîne ces fichiers bout à bout : pas de saut dans un titre, pas de
-   coupure entre deux titres. Le titre en cours au moment d'activer le mix garde sa fin normale.
-4. Passages gardés 14 jours, segments 1 jour, dans `<cache>/mix`. Les FLAC ne sont jamais touchés.
-
-Mesures :
-- morceaux de synthèse de 92,3 à 128,4 BPM : temps des deux titres à ~1 ms l'un de l'autre pendant toute
-  la rampe ; raccords entre segments sans saut de signal ;
-- vrais morceaux (Kevin MacLeod, incompetech.com, CC BY 4.0 : Hustle, Werq, Raving Energy, Electro Cabello,
-  Monkeys Spinning Monkeys, Funkorama), rampes jusqu'à 101 → 122 et 117 → 144 BPM : temps de chaque titre à
-  < 10 ms de la grille commune (médiane) ;
-- ~40 s de calcul par passage sur un processeur 4 cœurs sans carte graphique.
-
-Réglages issus de ces mesures : la confiance dans le tempo est le contraste du tempo trouvé avec ses
-voisins (vrais morceaux 3 à 15, sans rythme < 2) et l'accord des deux moitiés de l'extrait ; la position
-des temps est le point où les attaques graves s'empilent quand tous les temps sont repliés sur un seul
-(une moyenne de toutes les attaques était décalée jusqu'à 100 ms par les contretemps) ; l'étirement
-utilise le moteur R2 de rubberband (le moteur R3 dérive jusqu'à 100 ms sur une forte rampe).

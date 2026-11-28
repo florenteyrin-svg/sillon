@@ -18,7 +18,6 @@ import (
 	"github.com/florenteyrin-svg/sillon/server/internal/config"
 	"github.com/florenteyrin-svg/sillon/server/internal/db"
 	"github.com/florenteyrin-svg/sillon/server/internal/events"
-	"github.com/florenteyrin-svg/sillon/server/internal/mix"
 	"github.com/florenteyrin-svg/sillon/server/internal/scanner"
 	"github.com/florenteyrin-svg/sillon/server/internal/streamcache"
 	"github.com/florenteyrin-svg/sillon/server/internal/subsonic"
@@ -55,16 +54,9 @@ func main() {
 		log.Printf("cache: %v", err)
 	}
 	cache := &streamcache.Cache{Dir: cfg.CacheDir, MaxBytes: int64(cfg.CacheMaxGB * (1 << 30))}
-	mixer := mix.New(cfg.DJURL, cfg.MusicDir, filepath.Join(cfg.CacheDir, "mix"))
-	a := &api.API{DB: d, Hub: hub, Scanner: sc, Alacarte: ac, Subsonic: sub, Cache: cache, Mix: mixer}
-	if mixer != nil {
-		go func() {
-			for {
-				mixer.Trim()
-				time.Sleep(6 * time.Hour)
-			}
-		}()
-	}
+	a := &api.API{DB: d, Hub: hub, Scanner: sc, Alacarte: ac, Subsonic: sub, Cache: cache}
+	// The DJ mix was removed: its old transitions are deleted from the cache
+	os.RemoveAll(filepath.Join(cfg.CacheDir, "mix"))
 
 	// A new or changed album may have a new cover
 	go func() {

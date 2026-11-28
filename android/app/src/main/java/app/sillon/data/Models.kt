@@ -137,17 +137,6 @@ data class RecentItem(
 )
 
 @Serializable
-data class MixTransition(
-    val status: String = "",
-    val aOut: Double = 0.0,
-    val bIn: Double = 0.0,
-    val length: Double = 0.0,
-    val style: String = "",
-    val url: String? = null,
-    val error: String? = null,
-)
-
-@Serializable
 data class Me(val name: String, val admin: Boolean = false, val apiKey: String)
 
 @Serializable

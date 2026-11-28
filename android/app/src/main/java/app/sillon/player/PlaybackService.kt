@@ -44,7 +44,6 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var session: MediaLibrarySession
     private lateinit var api: SillonApi
     private lateinit var store: QueueStore
-    private lateinit var dj: DjMixer
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val handler = Handler(Looper.getMainLooper())
 
@@ -69,8 +68,6 @@ class PlaybackService : MediaLibraryService() {
             .build()
 
         restoreQueue()
-        dj = DjMixer(player, api, app.settings, scope)
-        handler.post(djTick)
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 saveQueue()
@@ -131,17 +128,6 @@ class PlaybackService : MediaLibraryService() {
     private fun recoverFromError() {
         val item = player.currentMediaItem ?: return
         val id = item.mediaId
-        // A DJ segment that cannot be played: the plain song right away, the music never stops for the mix
-        val e = item.mediaMetadata.extras
-        if (!e?.getString(Extras.DJ_PREV).isNullOrEmpty() || !e?.getString(Extras.DJ_NEXT).isNullOrEmpty()) {
-            val index = player.currentMediaItemIndex
-            val plain = item.toQueueTrack().copy(mixable = false).toMediaItem(api)
-            player.replaceMediaItem(index, plain)
-            player.seekTo(index, 0)
-            player.prepare()
-            player.play()
-            return
-        }
         if (id != retriedId) { retriedId = id; retries = 0 }
         if (retries >= 3) return
         retries++
@@ -169,20 +155,12 @@ class PlaybackService : MediaLibraryService() {
 
     private fun saveQueue() {
         if (!::player.isInitialized) return
-        // DJ transitions are not saved: they are prepared again when needed
         val items = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
         val cur = player.currentMediaItemIndex
         val index = items.take(cur.coerceAtLeast(0)).count { !it.isTransition }
         val onTransition = items.getOrNull(cur)?.isTransition == true
         val tracks = items.filter { !it.isTransition }.map { it.toQueueTrack() }
         store.save(SavedQueue(tracks, index, if (onTransition) 0 else player.currentPosition, player.shuffleModeEnabled, player.repeatMode))
-    }
-
-    private val djTick = object : Runnable {
-        override fun run() {
-            runCatching { dj.tick() }
-            handler.postDelayed(this, 500)
-        }
     }
 
     private val periodicSave = object : Runnable {
@@ -303,10 +281,7 @@ class PlaybackService : MediaLibraryService() {
             }
         }.filter { it.id != cur.mediaId }
         if (songs.isEmpty()) return false
-        // With the DJ mix, the song playing already flows into the next one: the songs go right after that one
-        val mixedInto = !e?.getString(Extras.DJ_NEXT).isNullOrEmpty()
-        val at = (player.currentMediaItemIndex + if (mixedInto) 2 else 1).coerceAtMost(player.mediaItemCount)
-        player.addMediaItems(at, songs.map { it.toQueueTrack(mixable).toMediaItem(api) })
+        player.addMediaItems(player.currentMediaItemIndex + 1, songs.map { it.toQueueTrack(mixable).toMediaItem(api) })
         return true
     }
 

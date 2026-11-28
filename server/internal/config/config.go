@@ -8,19 +8,17 @@ import (
 )
 
 type Config struct {
-	MusicDir   string // library root, read (and watched) recursively
-	DataDir    string // database, cover cache, mix cache
-	Listen     string // HTTP address, e.g. ":4747"
-	AdminUser  string // first account, created on first start
-	AdminPass  string // its password; generated and logged when empty
+	MusicDir    string        // library root, read (and watched) recursively
+	DataDir     string        // database, cover cache, mix cache
+	Listen      string        // HTTP address, e.g. ":4747"
+	AdminUser   string        // first account, created on first start
+	AdminPass   string        // its password; generated and logged when empty
 	RescanEvery time.Duration // safety rescan in case a file change was missed
 
 	CacheDir   string // songs played from the catalog without being downloaded (shared with à la carte)
 	CacheMaxGB float64
 
 	IncludeAtmos bool // index Dolby Atmos files too (off: they duplicate the FLAC albums)
-
-	DJURL string // Sillon DJ worker, e.g. http://sillon-dj:8085 (empty: DJ mix off)
 
 	AlacarteURL  string // e.g. http://alacarte-web:7373 (empty: catalog search off)
 	AlacarteUser string
@@ -37,7 +35,6 @@ func Load() Config {
 		RescanEvery:  time.Duration(envInt("SILLON_RESCAN_HOURS", 6)) * time.Hour,
 		CacheDir:     env("SILLON_CACHE_DIR", "/cache"),
 		CacheMaxGB:   float64(envInt("SILLON_CACHE_MAX_GB", 10)),
-		DJURL:        os.Getenv("SILLON_DJ_URL"),
 		IncludeAtmos: os.Getenv("SILLON_INCLUDE_ATMOS") == "true",
 		AlacarteURL:  os.Getenv("ALACARTE_URL"),
 		AlacarteUser: os.Getenv("ALACARTE_USER"),

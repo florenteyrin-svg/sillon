@@ -17,7 +17,6 @@ import (
 	"github.com/florenteyrin-svg/sillon/server/internal/alacarte"
 	"github.com/florenteyrin-svg/sillon/server/internal/db"
 	"github.com/florenteyrin-svg/sillon/server/internal/events"
-	"github.com/florenteyrin-svg/sillon/server/internal/mix"
 	"github.com/florenteyrin-svg/sillon/server/internal/scanner"
 	"github.com/florenteyrin-svg/sillon/server/internal/smart"
 	"github.com/florenteyrin-svg/sillon/server/internal/streamcache"
@@ -31,7 +30,6 @@ type API struct {
 	Alacarte *alacarte.Client // nil when not configured
 	Subsonic *subsonic.Server
 	Cache    *streamcache.Cache
-	Mix      *mix.Client // nil when the DJ worker is not configured
 
 	polling sync.Mutex
 }
@@ -52,9 +50,6 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/catalog/stream/{id}", a.auth(a.catalogStream))
 	mux.HandleFunc("GET /api/recent", a.auth(a.recent))
 	mux.HandleFunc("POST /api/import/jellyfin", a.auth(a.importJellyfin))
-	mux.HandleFunc("GET /api/mix/transition", a.auth(a.mixTransition))
-	mux.HandleFunc("GET /api/mix/file/{key}", a.auth(a.mixFile))
-	mux.HandleFunc("GET /api/mix/segment", a.auth(a.mixSegment))
 	mux.HandleFunc("GET /api/smart-playlists", a.auth(a.smartList))
 	mux.HandleFunc("POST /api/smart-playlists", a.auth(a.smartCreate))
 	mux.HandleFunc("PUT /api/smart-playlists/{id}", a.auth(a.smartUpdate))
@@ -93,7 +88,7 @@ func jsonError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "version": subsonic.Version, "alacarte": a.Alacarte != nil, "dj": a.Mix != nil})
+	writeJSON(w, map[string]any{"ok": true, "version": subsonic.Version, "alacarte": a.Alacarte != nil})
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -456,91 +451,6 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request, u *db.User) {
 		items = []item{}
 	}
 	writeJSON(w, items)
-}
-
-// mixTransition gives the DJ transition between two library songs (from = song playing, to = next one).
-// The first call starts preparing it; the app asks again until it is "done".
-func (a *API) mixTransition(w http.ResponseWriter, r *http.Request, u *db.User) {
-	if a.Mix == nil {
-		jsonError(w, http.StatusServiceUnavailable, "DJ mix is not set up (SILLON_DJ_URL)")
-		return
-	}
-	from, err1 := a.DB.TrackByID(r.Form.Get("from"))
-	to, err2 := a.DB.TrackByID(r.Form.Get("to"))
-	if err1 != nil || err2 != nil || from == nil || to == nil {
-		jsonError(w, 404, "unknown song")
-		return
-	}
-	t, err := a.Mix.Get(from.Path, to.Path)
-	if err != nil {
-		jsonError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, t)
-}
-
-// mixSegment sends one song of a DJ mix as a single file: [transition from prev] + song up to the
-// transition to next. prev / next are optional (song ids); their transitions must be ready.
-func (a *API) mixSegment(w http.ResponseWriter, r *http.Request, u *db.User) {
-	if a.Mix == nil {
-		jsonError(w, http.StatusServiceUnavailable, "DJ mix is not set up")
-		return
-	}
-	song, err := a.DB.TrackByID(r.Form.Get("song"))
-	if err != nil || song == nil {
-		jsonError(w, 404, "unknown song")
-		return
-	}
-	var prevT, nextT *mix.Transition
-	prevKey := ""
-	if id := r.Form.Get("prev"); id != "" {
-		prev, _ := a.DB.TrackByID(id)
-		if prev == nil {
-			jsonError(w, 404, "unknown previous song")
-			return
-		}
-		// Not ready (or lost when the server restarted): the song plays from its start rather than not at all
-		prevT, prevKey = a.Mix.Done(prev.Path, song.Path)
-		if prevT == nil {
-			prevKey = ""
-		}
-	}
-	if id := r.Form.Get("next"); id != "" {
-		next, _ := a.DB.TrackByID(id)
-		if next == nil {
-			jsonError(w, 404, "unknown next song")
-			return
-		}
-		nextT, _ = a.Mix.Done(song.Path, next.Path)
-	}
-	// A DJ problem must never stop the music: the plain song is sent instead
-	if prevT == nil && nextT == nil {
-		a.Subsonic.ServeTrack(w, r, song)
-		return
-	}
-	p, err := a.Mix.Segment(song.Path, song.Duration, prevKey, prevT, nextT)
-	if err != nil {
-		log.Printf("mix: segment %s: %v (plain song sent)", song.Title, err)
-		a.Subsonic.ServeTrack(w, r, song)
-		return
-	}
-	w.Header().Set("Content-Type", "audio/flac")
-	http.ServeFile(w, r, p)
-}
-
-func (a *API) mixFile(w http.ResponseWriter, r *http.Request, u *db.User) {
-	if a.Mix == nil {
-		jsonError(w, 404, "no DJ mix")
-		return
-	}
-	p, ok := a.Mix.File(r.PathValue("key"))
-	if !ok {
-		jsonError(w, 404, "no such transition")
-		return
-	}
-	w.Header().Set("Content-Type", "audio/flac")
-	w.Header().Set("Cache-Control", "public, max-age=604800")
-	http.ServeFile(w, r, p)
 }
 
 // pollJobs follows à la carte's queue after a download request and relays progress as live events,
