@@ -116,6 +116,18 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
             MoreExecutors.directExecutor())
     }
 
+    fun pause() { controller?.pause() }
+    fun play() { controller?.play() }
+
+    /** Jumps to a song of the queue (by id) at a position: used to take the music back from Music Assistant. */
+    fun resumeAt(songId: String?, positionMs: Long) {
+        val c = controller ?: return
+        val idx = (0 until c.mediaItemCount).firstOrNull { c.getMediaItemAt(it).mediaId == songId }
+        if (idx != null) c.seekTo(idx, positionMs) else c.seekTo(positionMs)
+        if (c.playbackState == Player.STATE_IDLE) c.prepare()
+        c.play()
+    }
+
     fun next() { controller?.seekToNextMediaItem() }
     fun previous() { controller?.seekToPrevious() }
     fun seekTo(ms: Long) { controller?.seekTo(ms); refresh() }

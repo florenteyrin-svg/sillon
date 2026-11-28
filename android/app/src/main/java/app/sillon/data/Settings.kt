@@ -24,6 +24,15 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("dj", false)
         set(v) = prefs.edit().putBoolean("dj", v).apply()
 
+    /** Music Assistant (send the music to the house's players). */
+    var maUrl: String
+        get() = prefs.getString("maUrl", "http://10.0.0.2:8095") ?: ""
+        set(v) = prefs.edit().putString("maUrl", v.trim()).apply()
+
+    var maToken: String
+        get() = prefs.getString("maToken", "") ?: ""
+        set(v) = prefs.edit().putString("maToken", v.trim()).apply()
+
     val isSignedIn: Boolean get() = serverUrl.isNotEmpty() && apiKey.isNotEmpty()
 
     fun signOut() = prefs.edit().remove("apiKey").apply()

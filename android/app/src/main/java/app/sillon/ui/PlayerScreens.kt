@@ -25,6 +25,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Pause
@@ -111,33 +114,36 @@ fun NowPlayingScreen(onClose: () -> Unit) {
     var seeking by remember { mutableStateOf<Float?>(null) }
     val art = t?.let { artFor(ctx, it, 1200) }
 
-    // Like Apple Music: the cover (or its animated version) fills the whole screen, controls over a dark fade
-    Box(Modifier.fillMaxSize().background(Color(0xFF111114))) {
-        if (art != null) {
-            AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        }
-        if (t != null && t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
-        Box(
-            Modifier.fillMaxSize().background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0f to Color.Black.copy(alpha = 0.35f), 0.18f to Color.Transparent, 0.45f to Color.Transparent,
-                    0.7f to Color.Black.copy(alpha = 0.75f), 1f to Color.Black.copy(alpha = 0.92f),
-                )
-            )
-        )
-        if (showQueue) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.8f)))
+    var showOutput by remember { mutableStateOf(false) }
 
-        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp)) {
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(Icons.Filled.KeyboardArrowDown, "Fermer", tint = Color.White, modifier = Modifier.size(32.dp)) }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { showQueue = !showQueue }) {
-                    Icon(Icons.AutoMirrored.Filled.QueueMusic, "File d'attente", tint = if (showQueue) MaterialTheme.colorScheme.primary else Color.White)
-                }
+    // Like Apple Music: the cover across the top, melting into a blurred, darkened copy of itself behind
+    // the controls
+    Box(Modifier.fillMaxSize().background(Color(0xFF1A1A1F))) {
+        if (art != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().blur(90.dp))
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
+
+        Column(Modifier.fillMaxSize()) {
+            if (!showQueue) Box(
+                Modifier.fillMaxWidth().aspectRatio(1f)
+                    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(0.55f to Color.Black, 1f to Color.Transparent),
+                            blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                        )
+                    }
+            ) {
+                if (art != null) AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                if (t != null && t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
             }
+            Column(Modifier.weight(1f).fillMaxWidth().navigationBarsPadding().padding(horizontal = 24.dp)) {
             if (t == null) { Message("Rien en lecture"); return@Column }
 
             if (showQueue) {
+                Spacer(Modifier.statusBarsPadding().height(56.dp))
                 Text("À suivre", color = Color.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
                 LazyColumn(Modifier.weight(1f)) {
                     itemsIndexed(s.queue) { i, q ->
@@ -213,7 +219,18 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             }
             if (t.mixable) DjButton()
             Spacer(Modifier.height(8.dp))
+            }
         }
+
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClose) { Icon(Icons.Filled.KeyboardArrowDown, "Fermer", tint = Color.White, modifier = Modifier.size(32.dp)) }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { showOutput = true }) { Icon(Icons.Filled.Cast, "Écouter sur Music Assistant", tint = Color.White) }
+            IconButton(onClick = { showQueue = !showQueue }) {
+                Icon(Icons.AutoMirrored.Filled.QueueMusic, "File d'attente", tint = if (showQueue) MaterialTheme.colorScheme.primary else Color.White)
+            }
+        }
+        if (showOutput) OutputSheet { showOutput = false }
     }
 }
 
@@ -278,16 +295,9 @@ private fun AnimatedCover(url: String) {
         exo.addListener(l)
         onDispose { exo.removeListener(l); exo.release() }
     }
+    // A TextureView (not a SurfaceView) so the video melts into the background like the still cover
     AndroidView(
-        factory = { c ->
-            PlayerView(c).apply {
-                useController = false
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                player = exo
-            }
-        },
+        factory = { c -> android.view.TextureView(c).also { exo.setVideoTextureView(it) } },
         // Shown only once the first frame is drawn, so the still cover never flashes black
         modifier = Modifier.fillMaxSize().then(if (ready) Modifier else Modifier.width(0.dp)),
     )

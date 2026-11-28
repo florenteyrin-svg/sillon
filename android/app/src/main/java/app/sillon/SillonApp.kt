@@ -16,12 +16,14 @@ class SillonApp : Application(), SingletonImageLoader.Factory {
     lateinit var settings: Settings
     lateinit var api: SillonApi
     lateinit var cache: DiskCache
+    lateinit var musicAssistant: app.sillon.data.MusicAssistant
 
     override fun onCreate() {
         super.onCreate()
         settings = Settings(this)
         api = SillonApi(settings)
         cache = DiskCache(this)
+        musicAssistant = app.sillon.data.MusicAssistant(settings, api.http)
     }
 
     // Covers are kept on the phone (500 MB), so lists show them instantly, even offline
