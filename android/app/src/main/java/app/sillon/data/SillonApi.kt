@@ -68,6 +68,9 @@ class SillonApi(private val settings: Settings) {
         return withKey("$base/rest/getCoverArt".toHttpUrl().newBuilder().addQueryParameter("id", id).addQueryParameter("size", size.toString()))
     }
 
+    /** The artist's photo (from Apple Music, kept by the server); 404 when there is none. */
+    fun artistImageUrl(id: String): String = withKey("$base/api/artist-image/$id".toHttpUrl().newBuilder())
+
     fun animatedCoverUrl(id: String): String = withKey("$base/api/animated-cover/$id".toHttpUrl().newBuilder())
 
     // ---- Subsonic ----

@@ -1,5 +1,6 @@
 package app.sillon.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -250,10 +251,9 @@ fun ArtistScreen(id: String) {
     val ctx = LocalApp.current
     val artist by cached("artist-$id", Artist.serializer()) { ctx.api.artist(id) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-        item { BackBar() }
-        val a = artist ?: run { item { Message("Chargement…") }; return@LazyColumn }
+        val a = artist ?: run { item { BackBar(); Message("Chargement…") }; return@LazyColumn }
         item {
-            ScreenTitle(a.name, "${a.album.size} albums")
+            ArtistHeader(id, a.name, "${a.album.size} albums")
             PlayButtons(
                 onPlay = { ctx.scope.playAlbums(ctx, a.album, false) },
                 onShuffle = { ctx.scope.playAlbums(ctx, a.album, true) },
@@ -348,4 +348,32 @@ private fun JellyfinImportDialog(onClose: () -> Unit) {
         },
         dismissButton = { if (result == null) androidx.compose.material3.TextButton(enabled = !busy, onClick = onClose) { Text("Annuler") } },
     )
+}
+
+/**
+ * Like Apple Music: the artist's photo across the top, melting into the page, the name written over it.
+ * Without a photo, the plain title.
+ */
+@Composable
+private fun ArtistHeader(id: String, name: String, subtitle: String) {
+    val ctx = LocalApp.current
+    var photo by remember(id) { mutableStateOf(true) }
+    if (!photo) { BackBar(); ScreenTitle(name, subtitle); return }
+    val bg = MaterialTheme.colorScheme.background
+    Box(Modifier.fillMaxWidth().aspectRatioSquare()) {
+        coil3.compose.AsyncImage(
+            ctx.api.artistImageUrl(id), name, contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            onError = { photo = false }, modifier = Modifier.fillMaxSize(),
+        )
+        Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(
+            0f to androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.35f), 0.25f to androidx.compose.ui.graphics.Color.Transparent,
+            0.6f to androidx.compose.ui.graphics.Color.Transparent, 1f to bg)))
+        IconButton(onClick = { ctx.nav.popBackStack() }, modifier = Modifier.statusBarsPadding().padding(8.dp)) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour", tint = androidx.compose.ui.graphics.Color.White)
+        }
+        Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text(name, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold, maxLines = 2)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }

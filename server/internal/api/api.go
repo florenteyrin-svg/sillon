@@ -41,6 +41,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/library/status", a.auth(a.status))
 	mux.HandleFunc("GET /api/library/changes", a.auth(a.changes))
 	mux.HandleFunc("GET /api/animated-cover/{id}", a.auth(a.animatedCover))
+	mux.HandleFunc("GET /api/artist-image/{id}", a.auth(a.artistImage))
 	mux.HandleFunc("GET /api/catalog/search", a.auth(a.catalogSearch))
 	mux.HandleFunc("GET /api/catalog/album/{id}", a.auth(a.catalogAlbum))
 	mux.HandleFunc("GET /api/catalog/artist/{id}", a.auth(a.catalogArtist))
