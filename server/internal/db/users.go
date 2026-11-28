@@ -89,6 +89,14 @@ func (d *DB) Star(userID int64, ids []string) error {
 	return nil
 }
 
+// ImportPlays sets the plays counted elsewhere (Jellyfin) for a song; Sillon's own plays are kept.
+func (d *DB) ImportPlays(userID int64, trackID string, count int, last int64) error {
+	_, err := d.Exec(`INSERT INTO plays (user_id, track_id, count, last_played, imported) VALUES (?, ?, 0, ?, ?)
+		ON CONFLICT (user_id, track_id) DO UPDATE SET imported = excluded.imported,
+		last_played = MAX(last_played, excluded.last_played)`, userID, trackID, last, count)
+	return err
+}
+
 // StarAt marks a favourite with the date it was added; a favourite already there takes the older date.
 func (d *DB) StarAt(userID int64, id string, at int64) error {
 	_, err := d.Exec(`INSERT INTO stars (user_id, item_id, created_at) VALUES (?, ?, ?)
@@ -135,7 +143,7 @@ func (d *DB) RecordPlay(userID int64, trackID string, at time.Time) error {
 
 // Plays returns track id -> play count for the user.
 func (d *DB) Plays(userID int64) (map[string]int, error) {
-	rows, err := d.Query(`SELECT track_id, count FROM plays WHERE user_id = ?`, userID)
+	rows, err := d.Query(`SELECT track_id, count + imported FROM plays WHERE user_id = ?`, userID)
 	if err != nil {
 		return nil, err
 	}

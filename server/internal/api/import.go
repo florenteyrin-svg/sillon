@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"time"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/florenteyrin-svg/sillon/server/internal/db"
@@ -24,7 +24,7 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 		jsonError(w, 400, "adresse et utilisateur Jellyfin requis")
 		return
 	}
-	songs, err := jellyfin.Favorites(b.URL, b.User, b.Password)
+	songs, played, err := jellyfin.Fetch(b.URL, b.User, b.Password)
 	if err != nil {
 		jsonError(w, http.StatusBadGateway, err.Error())
 		return
@@ -38,7 +38,7 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 	// it, so the Favoris playlist is in the order of addition, newest first, like the songs hearted in Sillon.
 	var ids []string
 	var at []int64
-	var missing []string
+	missing := []string{}
 	now := time.Now().Unix()
 	for i, s := range songs {
 		if id := a.matchSong(s, idx); id != "" {
@@ -59,11 +59,34 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 		}
 	}
 	log.Printf("jellyfin: %d favourites, %d found in the library", len(songs), len(ids))
+
+	// Plays: "Les plus écoutés" starts with Jellyfin's history
+	playsFound := 0
+	for _, s := range played {
+		if s.UserData.PlayCount <= 0 {
+			continue
+		}
+		id := a.matchSong(s, idx)
+		if id == "" {
+			continue
+		}
+		var last int64
+		if t := s.LastPlayed(); !t.IsZero() {
+			last = t.Unix()
+		}
+		if err := a.DB.ImportPlays(u.ID, id, s.UserData.PlayCount, last); err != nil {
+			jsonError(w, 500, err.Error())
+			return
+		}
+		playsFound++
+	}
+	log.Printf("jellyfin: %d songs played, %d found in the library", len(played), playsFound)
 	for _, m := range missing {
 		log.Printf("jellyfin: not found: %s", m)
 	}
 	sort.Strings(missing)
-	writeJSON(w, map[string]any{"total": len(songs), "imported": len(ids), "missing": missing})
+	writeJSON(w, map[string]any{"total": len(songs), "imported": len(ids), "missing": missing,
+		"played": len(played), "playsImported": playsFound})
 }
 
 func firstArtist(s jellyfin.Song) string {

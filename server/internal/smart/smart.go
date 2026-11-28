@@ -33,7 +33,7 @@ var textFields = map[string]string{
 }
 
 var numFields = map[string]string{
-	"year": "t.year", "duration": "t.duration", "playcount": "COALESCE(pl.count, 0)",
+	"year": "t.year", "duration": "t.duration", "playcount": "COALESCE(pl.count + pl.imported, 0)",
 	"bitdepth": "t.bit_depth", "samplerate": "t.sample_rate", "track": "t.track_no",
 }
 
@@ -72,7 +72,7 @@ func (r *Rules) sql(userID int64) (string, []any, error) {
 	}
 	order := map[string]string{
 		"random": "RANDOM()", "added": "t.created_at DESC", "added_asc": "t.created_at",
-		"plays": "COALESCE(pl.count, 0) DESC", "last_played": "COALESCE(pl.last_played, 0) DESC",
+		"plays": "COALESCE(pl.count + pl.imported, 0) DESC", "last_played": "COALESCE(pl.last_played, 0) DESC",
 		"title": "t.title COLLATE NOCASE", "artist": "t.album_artist COLLATE NOCASE, t.album, t.disc_no, t.track_no",
 		"year": "t.year DESC", "": "t.album_artist COLLATE NOCASE, t.album, t.disc_no, t.track_no",
 	}[r.Sort]

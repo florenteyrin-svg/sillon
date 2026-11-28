@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.sillon.data.Album
 import app.sillon.data.Playlist
+import app.sillon.player.toQueueTrack
 import app.sillon.data.RecentItem
 import app.sillon.data.appleArtwork
 import kotlinx.serialization.builtins.ListSerializer
@@ -54,6 +55,7 @@ fun HomeScreen() {
     val recent by cached("home-recent", ListSerializer(RecentItem.serializer())) { api.recent(30) }
     val newest by cached("home-newest", ListSerializer(Album.serializer())) { api.albumList("newest", 20) }
     val playlists by cached("home-playlists", ListSerializer(Playlist.serializer())) { api.playlists() }
+    val top by cached("home-most-played", Playlist.serializer()) { api.playlist(app.sillon.data.MOST_PLAYED_ID) }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
@@ -102,6 +104,21 @@ fun HomeScreen() {
                         val art = if (it.kind == "catalog") appleArtwork(it.artwork, 300) else api.coverUrl(it.albumId ?: it.id, 300)
                         AlbumTile(it.title, if (it.kind == "catalog") "Apple Music · ${it.artist}" else it.artist, art,
                             it.quality, width = 132.dp) { ctx.playRecent(rec, i) }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+        // Les plus écoutés: a tap plays from that song, like in a playlist; "Tout voir" opens it as a playlist
+        val topSongs = top?.entry.orEmpty()
+        if (topSongs.isNotEmpty()) {
+            item {
+                SectionTitle("Les plus écoutés", "Tout voir") { ctx.openPlaylist(app.sillon.data.MOST_PLAYED_ID) }
+                LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    itemsIndexed(topSongs.take(20)) { i, s ->
+                        AlbumTile(s.title, s.artist, api.coverUrl(s.albumId, 300), s.quality, width = 132.dp) {
+                            ctx.play(topSongs.map { it.toQueueTrack() }, i, mixable = true)
+                        }
                     }
                 }
                 Spacer(Modifier.height(18.dp))

@@ -95,6 +95,22 @@ func (s *Server) favorites(u *db.User) (*favoritesList, error) {
 	return &favoritesList{p, tracks}, nil
 }
 
+// MostPlayedID is "Les plus écoutés": the 100 songs played most (in Sillon, plus Jellyfin's history).
+const MostPlayedID = "pl-plus-ecoutes"
+
+func (s *Server) mostPlayed(u *db.User) (*favoritesList, error) {
+	tracks, err := s.DB.QueryTracks(`JOIN plays pl ON pl.track_id = t.id AND pl.user_id = ?
+		WHERE pl.count + pl.imported > 0 ORDER BY pl.count + pl.imported DESC, pl.last_played DESC LIMIT 100`, u.ID)
+	if err != nil {
+		return nil, err
+	}
+	p := &db.Playlist{ID: MostPlayedID, UserID: u.ID, Owner: u.Name, Name: "Les plus écoutés", Rules: "most-played", SongCount: len(tracks)}
+	for _, t := range tracks {
+		p.Duration += t.Duration
+	}
+	return &favoritesList{p, tracks}, nil
+}
+
 // ---- plays ----
 
 func (s *Server) scrobble(w http.ResponseWriter, r *http.Request, u *db.User) (M, *apiError) {
@@ -129,7 +145,7 @@ func (s *Server) playlist(p *db.Playlist) M {
 		"songCount": p.SongCount, "duration": int(p.Duration + 0.5), "created": iso(p.CreatedAt),
 		"changed": iso(p.UpdatedAt), "coverArt": p.ID, "readonly": p.Smart(),
 		// Sillon's own field: the app shows smart playlists apart
-		"smart": p.Smart() && p.ID != FavoritesID,
+		"smart": p.Smart() && p.ID != FavoritesID && p.ID != MostPlayedID,
 	}
 	return m
 }
@@ -155,6 +171,9 @@ func (s *Server) getPlaylists(w http.ResponseWriter, r *http.Request, u *db.User
 	if fav, err := s.favorites(u); err == nil {
 		out = append(out, s.playlist(fav.p))
 	}
+	if top, err := s.mostPlayed(u); err == nil && len(top.tracks) > 0 {
+		out = append(out, s.playlist(top.p))
+	}
 	for _, p := range ps {
 		if p.Smart() {
 			if ts, err := smart.Tracks(s.DB, p.Rules, u.ID); err == nil {
@@ -170,8 +189,12 @@ func (s *Server) getPlaylists(w http.ResponseWriter, r *http.Request, u *db.User
 }
 
 func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request, u *db.User) (M, *apiError) {
-	if r.Form.Get("id") == FavoritesID {
-		fav, err := s.favorites(u)
+	if id := r.Form.Get("id"); id == FavoritesID || id == MostPlayedID {
+		get := s.favorites
+		if id == MostPlayedID {
+			get = s.mostPlayed
+		}
+		fav, err := get(u)
 		if err != nil {
 			return nil, errGeneric(err)
 		}

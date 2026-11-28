@@ -18,6 +18,16 @@ type Song struct {
 	Artists     []string `json:"Artists"`
 	Path        string   `json:"Path"`
 	DateCreated string   `json:"DateCreated"` // when the song was added to Jellyfin
+	UserData    struct {
+		PlayCount      int    `json:"PlayCount"`
+		LastPlayedDate string `json:"LastPlayedDate"`
+	} `json:"UserData"`
+}
+
+// LastPlayed is when the song was last played in Jellyfin (zero when unknown).
+func (s Song) LastPlayed() time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s.UserData.LastPlayedDate)
+	return t
 }
 
 // Added is when the song was added to Jellyfin (zero when unknown).
@@ -28,9 +38,9 @@ func (s Song) Added() time.Time {
 
 const client = `MediaBrowser Client="Sillon", Device="Sillon", DeviceId="sillon-import", Version="1.0"`
 
-// Favorites signs in with the account (the password is only sent to Jellyfin, never kept) and returns
-// the songs marked as favourite.
-func Favorites(server, user, password string) ([]Song, error) {
+// Fetch signs in with the account (the password is only sent to Jellyfin, never kept) and returns the
+// songs marked as favourite and the songs played at least once (with their play count).
+func Fetch(server, user, password string) (favorites, played []Song, err error) {
 	server = strings.TrimRight(strings.TrimSpace(server), "/")
 	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
 		server = "http://" + server
@@ -43,14 +53,14 @@ func Favorites(server, user, password string) ([]Song, error) {
 	req.Header.Set("Authorization", client)
 	res, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Jellyfin injoignable : %v", err)
+		return nil, nil, fmt.Errorf("Jellyfin injoignable : %v", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode == 401 {
-		return nil, fmt.Errorf("Jellyfin refuse l'utilisateur ou le mot de passe")
+		return nil, nil, fmt.Errorf("Jellyfin refuse l'utilisateur ou le mot de passe")
 	}
 	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("Jellyfin répond %s", res.Status)
+		return nil, nil, fmt.Errorf("Jellyfin répond %s", res.Status)
 	}
 	var auth struct {
 		AccessToken string `json:"AccessToken"`
@@ -59,28 +69,37 @@ func Favorites(server, user, password string) ([]Song, error) {
 		} `json:"User"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&auth); err != nil || auth.AccessToken == "" {
-		return nil, fmt.Errorf("réponse de connexion Jellyfin illisible")
+		return nil, nil, fmt.Errorf("réponse de connexion Jellyfin illisible")
 	}
 
-	q := url.Values{
-		"Filters": {"IsFavorite"}, "IncludeItemTypes": {"Audio"}, "Recursive": {"true"},
-		"Fields": {"Path,DateCreated"}, "SortBy": {"DateCreated,SortName"}, "SortOrder": {"Descending"},
+	get := func(filter, sortBy string) ([]Song, error) {
+		q := url.Values{
+			"Filters": {filter}, "IncludeItemTypes": {"Audio"}, "Recursive": {"true"},
+			"Fields": {"Path,DateCreated"}, "SortBy": {sortBy}, "SortOrder": {"Descending"}, "EnableImages": {"false"},
+		}
+		req, _ := http.NewRequest("GET", server+"/Users/"+auth.User.ID+"/Items?"+q.Encode(), nil)
+		req.Header.Set("Authorization", client+`, Token="`+auth.AccessToken+`"`)
+		res, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("Jellyfin injoignable : %v", err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != 200 {
+			return nil, fmt.Errorf("Jellyfin répond %s", res.Status)
+		}
+		var out struct {
+			Items []Song `json:"Items"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			return nil, fmt.Errorf("réponse Jellyfin illisible")
+		}
+		return out.Items, nil
 	}
-	req, _ = http.NewRequest("GET", server+"/Users/"+auth.User.ID+"/Items?"+q.Encode(), nil)
-	req.Header.Set("Authorization", client+`, Token="`+auth.AccessToken+`"`)
-	res2, err := hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("Jellyfin injoignable : %v", err)
+	if favorites, err = get("IsFavorite", "DateCreated,SortName"); err != nil {
+		return nil, nil, err
 	}
-	defer res2.Body.Close()
-	if res2.StatusCode != 200 {
-		return nil, fmt.Errorf("Jellyfin répond %s pour les favoris", res2.Status)
+	if played, err = get("IsPlayed", "PlayCount,SortName"); err != nil {
+		return nil, nil, err
 	}
-	var out struct {
-		Items []Song `json:"Items"`
-	}
-	if err := json.NewDecoder(res2.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("liste des favoris Jellyfin illisible")
-	}
-	return out.Items, nil
+	return favorites, played, nil
 }

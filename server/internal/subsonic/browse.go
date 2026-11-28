@@ -268,7 +268,7 @@ func (s *Server) albumListQuery(r *http.Request, u *db.User) ([]*db.Album, *apiE
 	case "alphabeticalByArtist":
 		tail = `ORDER BY a.artist COLLATE NOCASE, a.year, a.name COLLATE NOCASE`
 	case "frequent", "highest":
-		tail = `JOIN (SELECT t.album_id, SUM(p.count) n FROM plays p JOIN tracks t ON t.id = p.track_id
+		tail = `JOIN (SELECT t.album_id, SUM(p.count + p.imported) n FROM plays p JOIN tracks t ON t.id = p.track_id
 			WHERE p.user_id = ? GROUP BY t.album_id) f ON f.album_id = a.id ORDER BY f.n DESC`
 		args = append(args, u.ID)
 	case "recent":
@@ -376,7 +376,7 @@ func (s *Server) getTopSongs(w http.ResponseWriter, r *http.Request, u *db.User)
 	name := r.Form.Get("artist")
 	tracks, err := s.DB.QueryTracks(`LEFT JOIN plays p ON p.track_id = t.id AND p.user_id = ?
 		WHERE t.artist = ? COLLATE NOCASE OR t.album_artist = ? COLLATE NOCASE
-		ORDER BY COALESCE(p.count, 0) DESC, t.year DESC LIMIT ?`, u.ID, name, name, clamp(intParam(r, "count", 50), 1, 500))
+		ORDER BY COALESCE(p.count + p.imported, 0) DESC, t.year DESC LIMIT ?`, u.ID, name, name, clamp(intParam(r, "count", 50), 1, 500))
 	if err != nil {
 		return nil, errGeneric(err)
 	}

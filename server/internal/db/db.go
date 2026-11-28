@@ -156,6 +156,8 @@ var migrations = []string{
 	`DELETE FROM tracks; DELETE FROM albums; DELETE FROM artists;`,
 	// Dolby Atmos files are no longer part of the library (they doubled the FLAC albums)
 	`DELETE FROM tracks WHERE quality = 'atmos'; DELETE FROM albums WHERE quality = 'atmos';`,
+	// Plays counted by Jellyfin, kept apart so importing again replaces them instead of adding them twice
+	`ALTER TABLE plays ADD COLUMN imported INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func (d *DB) migrate() error {

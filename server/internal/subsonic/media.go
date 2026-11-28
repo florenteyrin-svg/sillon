@@ -186,6 +186,11 @@ func (c *Covers) albumFor(id string) string {
 		var a string
 		c.DB.QueryRow(`SELECT id FROM albums WHERE artist_id = ? ORDER BY year DESC LIMIT 1`, id).Scan(&a)
 		return a
+	case id == MostPlayedID: // the song played most
+		var a string
+		c.DB.QueryRow(`SELECT t.album_id FROM plays pl JOIN tracks t ON t.id = pl.track_id
+			ORDER BY pl.count + pl.imported DESC LIMIT 1`).Scan(&a)
+		return a
 	case id == FavoritesID: // the song marked last
 		var a string
 		c.DB.QueryRow(`SELECT t.album_id FROM stars st JOIN tracks t ON t.id = st.item_id ORDER BY st.created_at DESC LIMIT 1`).Scan(&a)

@@ -102,7 +102,7 @@ fun LibraryScreen() {
             NavRow("Favoris") { ctx.openPlaylist(app.sillon.data.FAVORITES_ID) }
             NavRow("Albums préférés") { ctx.nav.navigate("favorite-albums") }
             NavRow("Sur le téléphone") { ctx.nav.navigate("offline") }
-            NavRow("Importer mes favoris Jellyfin") { showImport = true }
+            NavRow("Importer de Jellyfin (favoris et écoutes)") { showImport = true }
             Spacer(Modifier.height(16.dp))
             SectionTitle("Ajoutés récemment")
         }
@@ -370,12 +370,12 @@ private fun JellyfinImportDialog(onClose: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = { if (!busy) onClose() },
-        title = { Text("Favoris Jellyfin") },
+        title = { Text("Importer de Jellyfin") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (result != null) Text(result!!)
                 else {
-                    Text("Les titres en favori dans Jellyfin sont ajoutés à ta playlist Favoris.",
+                    Text("Tes favoris Jellyfin vont dans ta playlist Favoris, et tes écoutes dans « Les plus écoutés ». Tu peux recommencer sans rien doubler.",
                         style = MaterialTheme.typography.bodyMedium)
                     androidx.compose.material3.OutlinedTextField(url, { url = it.trim() }, label = { Text("Adresse de Jellyfin") }, singleLine = true)
                     androidx.compose.material3.OutlinedTextField(user, { user = it.trim() }, label = { Text("Utilisateur Jellyfin") }, singleLine = true)
@@ -393,8 +393,10 @@ private fun JellyfinImportDialog(onClose: () -> Unit) {
                     runCatching { ctx.api.importJellyfin(url, user, password) }
                         .onSuccess { r ->
                             ctx.loadFavorites()
-                            result = "${r.imported} favoris sur ${r.total} ajoutés à ta playlist Favoris." +
-                                (if (r.missing.isNotEmpty()) "\n\nPas trouvés dans ta bibliothèque :\n" + r.missing.joinToString("\n") else "")
+                            val missing = r.missing.orEmpty()
+                            result = "${r.imported} favoris sur ${r.total} ajoutés à ta playlist Favoris.\n" +
+                                "${r.playsImported} titres écoutés sur ${r.played} repris dans « Les plus écoutés »." +
+                                (if (missing.isNotEmpty()) "\n\nFavoris pas trouvés dans ta bibliothèque :\n" + missing.joinToString("\n") else "")
                         }
                         .onFailure { ctx.toast.value = it.message }
                     busy = false
