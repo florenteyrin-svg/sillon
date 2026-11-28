@@ -24,7 +24,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -107,16 +109,25 @@ fun NowPlayingScreen(onClose: () -> Unit) {
     val t = s.current
     var showQueue by remember { mutableStateOf(false) }
     var seeking by remember { mutableStateOf<Float?>(null) }
-    val art = t?.let { artFor(ctx, it, 1000) }
+    val art = t?.let { artFor(ctx, it, 1200) }
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF1C1C22))) {
-        // Background: the cover, blurred (Android 12+), under a dark veil
-        if (art != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().blur(60.dp))
+    // Like Apple Music: the cover (or its animated version) fills the whole screen, controls over a dark fade
+    Box(Modifier.fillMaxSize().background(Color(0xFF111114))) {
+        if (art != null) {
+            AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
+        if (t != null && t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
+        Box(
+            Modifier.fillMaxSize().background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0f to Color.Black.copy(alpha = 0.35f), 0.18f to Color.Transparent, 0.45f to Color.Transparent,
+                    0.7f to Color.Black.copy(alpha = 0.75f), 1f to Color.Black.copy(alpha = 0.92f),
+                )
+            )
+        )
+        if (showQueue) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.8f)))
 
-        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 28.dp)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp)) {
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onClose) { Icon(Icons.Filled.KeyboardArrowDown, "Fermer", tint = Color.White, modifier = Modifier.size(32.dp)) }
                 Spacer(Modifier.weight(1f))
@@ -140,19 +151,15 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                         }
                     }
                 }
-            } else {
-                Spacer(Modifier.weight(0.4f))
-                Box(Modifier.fillMaxWidth().aspectRatio(1f).shadow(24.dp, RoundedCornerShape(14.dp)).clip(RoundedCornerShape(14.dp))) {
-                    Artwork(art, Modifier.fillMaxSize(), corner = 14.dp)
-                    // Animated cover, like Apple Music: a silent looping video over the still cover
-                    if (t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
-                }
-                Spacer(Modifier.weight(0.4f))
-            }
+            } else Spacer(Modifier.weight(1f))
 
-            Spacer(Modifier.height(16.dp))
-            Text(t.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(t.artist, color = Color.White.copy(alpha = 0.72f), fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(t.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(t.artist, color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                QualityBadge(t.quality, onDark = true, large = true)
+            }
 
             val dur = s.durationMs.coerceAtLeast(1)
             val pos = seeking ?: (s.positionMs.toFloat() / dur).coerceIn(0f, 1f)
@@ -160,18 +167,17 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                 value = pos, onValueChange = { seeking = it },
                 onValueChangeFinished = { seeking?.let { ctx.player.seekTo((it * dur).toLong()) }; seeking = null },
                 colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.25f)),
-                modifier = Modifier.padding(top = 10.dp),
+                modifier = Modifier.padding(top = 8.dp),
             )
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth()) {
                 Text(formatDuration((pos * dur / 1000).toInt()), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
-                QualityBadge(t.quality, onDark = true, large = true)
                 if (t.isCatalog) Text("Apple Music", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
                 Text("-" + formatDuration(((dur - pos * dur) / 1000).toInt()), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
             }
 
-            Row(Modifier.fillMaxWidth().padding(vertical = 18.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { ctx.player.setShuffle(!s.shuffle) }) {
                     Icon(Icons.Filled.Shuffle, "Aléatoire", tint = if (s.shuffle) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f))
                 }
@@ -193,10 +199,33 @@ fun NowPlayingScreen(onClose: () -> Unit) {
                         tint = if (s.repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f))
                 }
             }
-            // DJ mix: for playlists and all songs, never albums
+
+            // Album / Artist: the album in order, or all the artist's songs shuffled, right after this song
+            if (!t.isCatalog) {
+                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    QueueAfterButton("Album à la suite", Icons.Filled.Album, Modifier.weight(1f)) {
+                        ctx.player.queueAfter("album") { ok -> ctx.toast.value = if (ok) "Album « ${t.album} » ajouté à la suite" else "Album introuvable sur le serveur" }
+                    }
+                    QueueAfterButton("Artiste à la suite", Icons.Filled.Person, Modifier.weight(1f)) {
+                        ctx.player.queueAfter("artist") { ok -> ctx.toast.value = if (ok) "Titres de ${t.artist} ajoutés à la suite (aléatoire)" else "Artiste introuvable sur le serveur" }
+                    }
+                }
+            }
             if (t.mixable) DjButton()
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
         }
+    }
+}
+
+@Composable
+private fun QueueAfterButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier, onClick: () -> Unit) {
+    Row(
+        modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.14f)).clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(icon, null, tint = Color.White)
+        Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
     }
 }
 

@@ -107,6 +107,15 @@ class PlayerConnection(context: Context, private val api: SillonApi) {
         }
     }
 
+    /** "album" or "artist": queued right after the playing song (handled by the playback service). */
+    fun queueAfter(kind: String, onDone: (Boolean) -> Unit) {
+        val c = controller ?: return
+        val cmd = if (kind == "album") PlaybackService.CMD_ALBUM else PlaybackService.CMD_ARTIST
+        val f = c.sendCustomCommand(cmd, android.os.Bundle.EMPTY)
+        f.addListener({ onDone(runCatching { f.get().resultCode == androidx.media3.session.SessionResult.RESULT_SUCCESS }.getOrDefault(false)) },
+            MoreExecutors.directExecutor())
+    }
+
     fun next() { controller?.seekToNextMediaItem() }
     fun previous() { controller?.seekToPrevious() }
     fun seekTo(ms: Long) { controller?.seekTo(ms); refresh() }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Record with grooves and a light reflection, so its rotation is visible -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="120dp" android:height="120dp" android:viewportWidth="120" android:viewportHeight="120">
+  <path android:fillColor="#FF111114" android:pathData="M60,60m-60,0a60,60 0,1 1,120 0a60,60 0,1 1,-120 0"/>
+  <path android:strokeColor="#FF2A2A32" android:strokeWidth="0.8" android:pathData="M60,60m-54,0a54,54 0,1 1,108 0a54,54 0,1 1,-108 0"/>
+  <path android:strokeColor="#FF2A2A32" android:strokeWidth="0.8" android:pathData="M60,60m-47,0a47,47 0,1 1,94 0a47,47 0,1 1,-94 0"/>
+  <path android:strokeColor="#FF2A2A32" android:strokeWidth="0.8" android:pathData="M60,60m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0"/>
+  <path android:strokeColor="#FF2A2A32" android:strokeWidth="0.8" android:pathData="M60,60m-33,0a33,33 0,1 1,66 0a33,33 0,1 1,-66 0"/>
+  <path android:fillColor="#33FFFFFF" android:pathData="M60,60 L104,22 A58,58 0,0 1,114 40 Z"/>
+  <path android:fillColor="#22FFFFFF" android:pathData="M60,60 L16,98 A58,58 0,0 1,6 80 Z"/>
+</vector>

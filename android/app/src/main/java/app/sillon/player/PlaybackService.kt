@@ -91,7 +91,14 @@ class PlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         session = MediaLibrarySession.Builder(this, player, LibraryCallback())
             .setSessionActivity(openApp)
+            .setMediaButtonPreferences(listOf(
+                androidx.media3.session.CommandButton.Builder(androidx.media3.session.CommandButton.ICON_ALBUM)
+                    .setDisplayName("Album à la suite").setSessionCommand(CMD_ALBUM).build(),
+                androidx.media3.session.CommandButton.Builder(androidx.media3.session.CommandButton.ICON_ARTIST)
+                    .setDisplayName("Artiste à la suite").setSessionCommand(CMD_ARTIST).build(),
+            ))
             .build()
+        Widget.attach(this, player, api, scope)
         setMediaNotificationProvider(DefaultMediaNotificationProvider.Builder(this).build().apply {
             setSmallIcon(R.drawable.ic_notification)
         })
@@ -246,7 +253,47 @@ class PlaybackService : MediaLibraryService() {
         return api.song(item.mediaId).toQueueTrack().also { known[it.id] = it }.toMediaItem(api)
     }
 
+    /**
+     * Album button: the playing song's album, in order, right after it. Artist button: all the artist's songs,
+     * shuffled, right after it. Library songs only (not Apple Music ones).
+     */
+    private suspend fun queueAfterCurrent(kind: String): Boolean {
+        val cur = player.currentMediaItem ?: return false
+        if (cur.mediaId.startsWith(CATALOG_PREFIX)) return false
+        val e = cur.mediaMetadata.extras
+        val mixable = e?.getBoolean(Extras.MIXABLE) ?: false
+        val songs = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            if (kind == "album") {
+                val albumId = e?.getString(Extras.ALBUM_ID).orEmpty()
+                if (albumId.isEmpty()) emptyList() else api.album(albumId).song
+            } else {
+                val artistId = e?.getString(Extras.ARTIST_ID).orEmpty()
+                val name = cur.mediaMetadata.artist?.toString().orEmpty()
+                val byId = runCatching { api.artist(artistId).album.flatMap { api.album(it.id).song } }.getOrDefault(emptyList())
+                (byId.ifEmpty { api.search(name).songs.filter { it.artist.equals(name, true) } }).shuffled()
+            }
+        }.filter { it.id != cur.mediaId }
+        if (songs.isEmpty()) return false
+        player.addMediaItems(player.currentMediaItemIndex + 1, songs.map { it.toQueueTrack(mixable).toMediaItem(api) })
+        return true
+    }
+
     private inner class LibraryCallback : MediaLibrarySession.Callback {
+        override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult =
+            MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(
+                    MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(CMD_ALBUM).add(CMD_ARTIST).build()
+                ).build()
+
+        override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo,
+                                     customCommand: androidx.media3.session.SessionCommand, args: Bundle):
+            ListenableFuture<androidx.media3.session.SessionResult> = scope.future {
+            val kind = if (customCommand.customAction == CMD_ALBUM.customAction) "album" else "artist"
+            val ok = runCatching { queueAfterCurrent(kind) }.getOrDefault(false)
+            androidx.media3.session.SessionResult(
+                if (ok) androidx.media3.session.SessionResult.RESULT_SUCCESS else androidx.media3.session.SessionError.ERROR_BAD_VALUE)
+        }
+
         override fun onGetLibraryRoot(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, params: LibraryParams?):
             ListenableFuture<LibraryResult<MediaItem>> =
             com.google.common.util.concurrent.Futures.immediateFuture(LibraryResult.ofItem(browsable(ROOT, "Sillon"), params))
@@ -319,6 +366,8 @@ class PlaybackService : MediaLibraryService() {
     }
 
     companion object {
+        val CMD_ALBUM = androidx.media3.session.SessionCommand("sillon.album", Bundle.EMPTY)
+        val CMD_ARTIST = androidx.media3.session.SessionCommand("sillon.artist", Bundle.EMPTY)
         const val ROOT = "root"
         const val RECENT = "recent"
         const val PLAYLISTS = "playlists"
