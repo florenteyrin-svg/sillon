@@ -74,6 +74,7 @@ class PlaybackService : MediaLibraryService() {
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 saveQueue()
+                prefetchNextCatalog()
                 scheduleScrobble(mediaItem)
             }
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = saveQueue()
@@ -187,6 +188,22 @@ class PlaybackService : MediaLibraryService() {
         if (current.startsWith(CATALOG_PREFIX) || current.startsWith(MIX_PREFIX) || ids.isEmpty()) return
         val pos = player.currentPosition
         scope.launch(Dispatchers.IO) { runCatching { api.savePlayQueue(ids, current, pos) } }
+    }
+
+    /**
+     * The next song comes from Apple Music: ask the server to fetch it now, so it starts at once when its
+     * turn comes (opening its stream address starts the download on the server).
+     */
+    private fun prefetchNextCatalog() {
+        val next = player.nextMediaItemIndex.takeIf { it >= 0 } ?: return
+        val item = player.getMediaItemAt(next)
+        if (!item.mediaId.startsWith(CATALOG_PREFIX)) return
+        val uri = item.localConfiguration?.uri?.toString() ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                api.http.newCall(okhttp3.Request.Builder().url(uri).header("Range", "bytes=0-0").build()).execute().close()
+            }
+        }
     }
 
     /** A library song counts as played once it has played 30 seconds. */
