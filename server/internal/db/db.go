@@ -154,6 +154,8 @@ var migrations = []string{
 	CREATE INDEX catalog_plays_recent ON catalog_plays(user_id, played_at);`,
 	// Track ids now keep the path's letter case: index everything again with the new ids
 	`DELETE FROM tracks; DELETE FROM albums; DELETE FROM artists;`,
+	// Dolby Atmos files are no longer part of the library (they doubled the FLAC albums)
+	`DELETE FROM tracks WHERE quality = 'atmos'; DELETE FROM albums WHERE quality = 'atmos';`,
 }
 
 func (d *DB) migrate() error {

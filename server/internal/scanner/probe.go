@@ -55,8 +55,17 @@ func probe(root, rel string, info os.FileInfo) (*db.Track, error) {
 		}
 	}
 	finish(t, full)
+	if t.Atmos && SkipAtmos {
+		return nil, ErrSkipped
+	}
 	return t, nil
 }
+
+// SkipAtmos leaves Dolby Atmos files out of the library (they duplicate the FLAC versions of the same albums).
+var SkipAtmos = true
+
+// ErrSkipped marks a file deliberately left out of the library.
+var ErrSkipped = errors.New("left out of the library")
 
 func probeFLAC(full string, t *db.Track) error {
 	f, err := os.Open(full)

@@ -110,18 +110,23 @@ Conteneur `sillon-dj` (`dj/sillon_dj.py`, Python : librosa, Demucs, rubberband).
 
 1. L'appli demande `GET /api/mix/transition?from=&to=` pour les titres à venir ; Sillon transmet au
    conteneur DJ, qui calcule en tâche de fond ; l'appli redemande jusqu'à `done`.
-2. Seules la fin de A (~50 s) et le début de B (~50 s) sont traités :
-   - grille de battements au centième de BPM, premier temps de mesure, tonalité (roue de Camelot) ;
-   - **rampe de tempo comme le bouton SYNC d'un logiciel DJ** : pendant 16 mesures le tempo glisse de
-     celui de A à celui de B (rap 90 → techno 130 compris, jusqu'à ×1,6 après regroupement double/demi
-     temps) ; les deux titres sont étirés battement par battement sur cette même courbe (carte de temps
-     rubberband, hauteur conservée), donc restent calés tout du long ;
-   - séparation voix / batterie / basse / reste (Demucs `htdemucs`, carte NVIDIA si utilisable) ;
-   - jamais deux mélodies à la fois : batterie de B (mesures 2-4), bascule batterie + basse à la mesure 8
-     (basse de B à la mesure 12 si les tonalités ne vont pas ensemble), la voix de A chante sur le rythme de
-     B (mesures 8-12), puis la mélodie et la voix de B ;
-   - début = son exact de A, fin = son exact de B à son propre tempo (fondus de 50 ms dans l'original).
-   - Pas de rythme régulier ou tempos trop éloignés : fondu enchaîné de 10 s.
+2. Seules la fin de A (~75 s) et le début de B (~75 s) sont traités, sur le modèle d'AutoMix (Apple),
+   de Spotify Mix et des règles de DJ relevées par Zehren et al. (Computer Music Journal, 2022) :
+   - grille de battements au centième de BPM, premiers temps de mesure, tonalité (roue de Camelot),
+     énergie et harmonie par blocs de 4 mesures ;
+   - **A** : la transition commence au début de son outro (bloc de 4 mesures où l'énergie baisse et
+     l'harmonie change), en coupant au plus 8 mesures de A ;
+   - **B** : placé pour que sa première partie forte (plus forte hausse d'énergie de ses 32 premières
+     mesures) arrive pile à la fin de la transition ;
+   - **8 mesures** (comme le maximum de Spotify Mix), **4** si les tonalités ne vont pas ensemble ;
+   - calage battement par battement, légère rampe de tempo de A vers B (étirement rubberband R2, hauteur
+     conservée) ;
+   - **mix à l'égaliseur** comme un DJ : les aigus de B montent sur la 1re moitié, les basses s'échangent
+     sur le premier temps du milieu, les aigus de A s'effacent sur la 2e moitié. Pas de séparation des
+     sources : rapide (~10 s par transition sur processeur) et chaque titre garde son son ;
+   - tempos à plus de 8 % (après regroupement double/demi temps) ou rythme non régulier : fondu de 6 s
+     entre la vraie fin de A et le vrai début de B, comme AutoMix (`SILLON_DJ_MAX_TEMPO_RATIO` pour changer) ;
+   - début = son exact de A, fin = son exact de B (fondus de 50 ms dans l'original).
 3. **Segments** : `GET /api/mix/segment?song=&prev=&next=` rend un titre du mix en UN fichier continu :
    [passage depuis prev] + le titre jusqu'au point exact où commence le passage vers next (44,1 kHz /
    24 bits pour tous). Le téléphone enchaîne ces fichiers bout à bout : pas de saut dans un titre, pas de

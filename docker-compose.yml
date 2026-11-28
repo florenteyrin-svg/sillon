@@ -16,6 +16,7 @@ services:
       - ALACARTE_PASSWORD=${ALACARTE_PASSWORD:-}
       - SILLON_CACHE_MAX_GB=${SILLON_CACHE_MAX_GB:-10}
       - SILLON_DJ_URL=http://sillon-dj:8085
+      - SILLON_INCLUDE_ATMOS=${SILLON_INCLUDE_ATMOS:-false}
       - TZ=${TZ:-Europe/Paris}
     volumes:
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/music:ro   # Sillon never changes your files

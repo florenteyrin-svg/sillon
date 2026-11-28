@@ -32,9 +32,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 SR = 44100
-WINDOW = 50.0  # seconds decoded at each side
+WINDOW = 75.0  # seconds decoded at each side
 BARS = 16
-MAX_TEMPO_RATIO = 1.6  # beyond this (after double/half time), a crossfade instead of a beat-matched mix
+MAX_TEMPO_RATIO = float(os.environ.get("SILLON_DJ_MAX_TEMPO_RATIO", "1.08"))  # beyond: crossfade (like AutoMix)  # beyond this (after double/half time), a crossfade instead of a beat-matched mix
 MIN_BEAT_CONTRAST = 2.5  # how much the found tempo must stand out (real songs: 3 to 15, beatless: < 2)
 JOIN = 0.05  # seconds: both ends of a transition melt into the original songs (sample-exact joins)
 
@@ -363,127 +363,146 @@ class Separator:
 # ---------------------------------------------------------------- transition
 
 
+def phrase_profile(x, grid, t_from, t_to, bars=4):
+    """Energy (dB) and harmony of each `bars`-bar block from the first downbeat at or after t_from."""
+    import librosa
+
+    start = grid.downbeat_at_or_after(t_from)
+    length = bars * 4 * grid.period
+    out = []
+    t = start
+    prev_chroma = None
+    while t + length <= t_to:
+        seg = x[:, int(t * SR): int((t + length) * SR)]
+        energy = float(20 * np.log10(np.sqrt((seg ** 2).mean()) + 1e-9))
+        chroma = librosa.feature.chroma_stft(y=seg.mean(axis=0), sr=SR, hop_length=4096).mean(axis=1)
+        change = 0.0 if prev_chroma is None else float(np.linalg.norm(chroma - prev_chroma))
+        out.append((t, energy, change))
+        prev_chroma = chroma
+        t += length
+    return out
+
+
+def low_high(x):
+    """Bass (< 180 Hz) and the rest; zero-phase, and low + high == x exactly."""
+    import scipy.signal as sg
+
+    sos = sg.butter(4, 180, btype="low", fs=SR, output="sos")
+    low = sg.sosfiltfilt(sos, x, axis=1).astype(np.float32)
+    return low, (x - low).astype(np.float32)
+
+
 def plan_and_render(sep, a_path, b_path, workdir="/tmp"):
-    """Beat-matched transition with a tempo ramp, like the SYNC button of a DJ software: over the transition
-    the tempo glides from A's to B's, and both songs follow that same curve beat by beat. It starts on A
-    exactly (same tempo, same sound) and ends on B exactly (B's own tempo, same sound)."""
+    """A transition the way DJs do it (and AutoMix / Spotify Mix): short (8 bars, 4 when the keys clash),
+    beat-matched, placed on the song structure:
+      - it starts on a phrase boundary where A's outro begins (energy drops, harmony changes);
+      - B is lined up so its first strong section lands right when the transition ends;
+      - EQ mix: B's treble rises over the first half, the basses swap on the middle downbeat, A's treble
+        fades over the second half. No source separation: fast, and every song sounds as it was made.
+    Tempos too far apart or no steady beat: a smooth crossfade between A's real end and B's real start."""
     t0 = time.time()
     a_dur, _ = probe(a_path)
     b_dur, _ = probe(b_path)
 
-    # A: last WINDOW seconds, up to its real end
     a_start = max(0.0, a_dur - WINDOW)
     a = decode(a_path, a_start, a_dur - a_start)
     _, a_end = trim_points(a)
     a = a[:, :a_end]
+    a_len = a.shape[1] / SR
 
-    # B: first WINDOW seconds, from its real start
     b_probe = decode(b_path, 0, min(WINDOW, b_dur))
     b_first, _ = trim_points(b_probe)
     b_start = b_first / SR
+    b_body = b_probe[:, b_first:]
 
     ga = beat_grid(a)
-    gb = beat_grid(b_probe[:, b_first:])
+    gb = beat_grid(b_body)
     meta = {}
     if ga is None or gb is None or ga.strength < MIN_BEAT_CONTRAST or gb.strength < MIN_BEAT_CONTRAST:
         meta["reason"] = "no steady beat"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
     pa = ga.period
     mult = beat_multiple(pa, gb.period)
-    pb = gb.period * mult  # B's pulse, in the unit matched with A's beats
+    pb = gb.period * mult
     meta.update({"tempoA": round(ga.bpm, 2), "tempoB": round(gb.bpm, 2)})
     if max(pa, pb) / min(pa, pb) > MAX_TEMPO_RATIO:
         meta["reason"] = "tempos too far apart"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
 
-    # Transition length in beats: 16 bars, fewer if A's ending or B's opening is too short
-    a_len = a.shape[1] / SR
-    b_avail = min(WINDOW, b_dur) - b_start
-    bars = BARS
-    while bars > 4:
-        nb = bars * 4
-        last_down = ga.downbeat_at_or_after(a_len - nb * pa - 4 * pa)
-        if last_down + nb * pa > a_len:
-            last_down -= 4 * pa
-        b_down = gb.downbeat_at_or_after(0.0)
-        if last_down >= 0 and b_down + nb * pb + 1 < b_avail:
-            break
-        bars //= 2
+    # Keys decide the length: two harmonies that clash should overlap as little as possible
+    ka = musical_key(a[:, max(0, a.shape[1] - int(30 * SR)):])
+    kb = musical_key(b_body[:, : int(30 * SR)])
+    compatible = keys_compatible(ka, kb)
+    bars = 8 if compatible else 4
     nb = bars * 4
-    last_down = ga.downbeat_at_or_after(a_len - nb * pa - 4 * pa)
-    if last_down + nb * pa > a_len:
-        last_down -= 4 * pa
-    b_down = gb.downbeat_at_or_after(0.0)
-    if last_down < 0 or b_down + nb * pb + 1 >= b_avail:
-        meta["reason"] = "excerpt too short"
+    meta.update({"keyA": key_name(ka), "keyB": key_name(kb), "keysCompatible": compatible})
+
+    # --- Where A leaves: the start of its outro (phrase boundary followed by an energy drop),
+    # cutting at most 16 bars of A beyond the transition.
+    length_a = nb * pa
+    prof = phrase_profile(a, ga, 0.0, a_len)
+    best, best_score = None, None
+    for i, (t, energy, change) in enumerate(prof):
+        if t + length_a > a_len or a_len - t > length_a + 8 * 4 * pa:
+            continue
+        before = prof[i - 1][1] if i > 0 else energy
+        score = (before - energy) + 2.0 * change + 0.02 * t  # energy drop, new section, keep more of A
+        if best_score is None or score > best_score:
+            best, best_score = t, score
+    if best is None:
+        best = ga.downbeat_at_or_after(a_len - length_a - 4 * pa)
+        while best + length_a > a_len and best > 0:
+            best -= 4 * pa
+    if best < 0:
+        meta["reason"] = "ending too short"
+        return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
+    cue_a = best
+
+    # --- Where B enters: lined up so that its first strong section (biggest energy rise in its first 32 bars)
+    # starts right when the transition ends; B's intro plays during the transition.
+    bprof = phrase_profile(b_body, gb, 0.0, min(b_body.shape[1] / SR, 32 * 4 * gb.period + gb.phase + 1))
+    first_down = gb.downbeat_at_or_after(0.0)
+    target = first_down + nb * pb  # default: B starts on its first downbeat
+    best_rise = 3.0  # dB: a real change, not noise
+    for i in range(1, len(bprof)):
+        rise = bprof[i][1] - bprof[i - 1][1]
+        if rise > best_rise and first_down + nb * pb - 1e-6 <= bprof[i][0] <= first_down + (nb + 64) * pb:
+            target, best_rise = bprof[i][0], rise
+    cue_b = target - nb * pb  # seconds in b_body, on a downbeat
+    b_abs = b_start + cue_b
+    if b_abs + nb * pb + 1 > min(WINDOW, b_dur):
+        meta["reason"] = "opening too short"
         return crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0)
 
-    # Output beat grid: the beat period glides from A's to B's (linear in tempo)
+    # --- Shared beat grid: the tempo glides from A's to B's over the transition (small: tempos are close)
     bpm_curve = np.linspace(60 / pa, 60 / pb, nb + 1)
-    periods = 60 / bpm_curve[:-1]
-    out_beats = np.concatenate([[0.0], np.cumsum(periods)])
+    out_beats = np.concatenate([[0.0], np.cumsum(60 / bpm_curve[:-1])])
     length = float(out_beats[-1])
     n = int(round(length * SR))
 
-    # Inputs: A from its downbeat, B from its first downbeat, exactly nb beats each
-    i0 = int(round(last_down * SR))
+    i0 = int(round(cue_a * SR))
     a_in = a[:, i0: i0 + int(round(nb * pa * SR)) + int(0.2 * SR)]
-    b_abs = b_start + b_down  # seconds in B
     b_in_audio = decode(b_path, b_abs, nb * pb + 0.2)
-    src_a = np.arange(nb + 1) * pa
-    src_b = np.arange(nb + 1) * pb
-    a_seg = stretch_to_beats(a_in, src_a, out_beats, n, workdir, "a")
-    b_seg = stretch_to_beats(b_in_audio, src_b, out_beats, n, workdir, "b")
-
-    # Self-check: where do each song's onsets fall relative to the shared beat grid? (diagnostic in the log)
+    a_seg = stretch_to_beats(a_in, np.arange(nb + 1) * pa, out_beats, n, workdir, "a")
+    b_seg = stretch_to_beats(b_in_audio, np.arange(nb + 1) * pb, out_beats, n, workdir, "b")
     meta["syncA_ms"] = beat_offset_ms(a_seg, out_beats)
     meta["syncB_ms"] = beat_offset_ms(b_seg, out_beats)
 
-    sa = sep.split(a_seg)
-    sb = sep.split(b_seg)
-
-    # Keys: two melodies or voices in clashing keys sound wrong even when the beats match
-    ka, kb = musical_key(a_seg), musical_key(b_seg)
-    compatible = keys_compatible(ka, kb)
-    meta.update({"keyA": key_name(ka), "keyB": key_name(kb), "keysCompatible": compatible})
-
-    # Never two melodies at once. Over the transition (1 bar = 1/16 of it):
-    #  bars 2-4  B's drums come in (no pitch: no clash), both kits play in sync
-    #  bar 8     swap: B's drums and bass take over, A's melody and rhythm leave
-    #  bars 8-12 A's voice sings on B's beat (B's bass waits until bar 12 if the keys clash)
-    #  bar 12    A's voice leaves, B's melody comes in, then B's voice
-    # Bars are placed on the real (varying) beat grid of the transition.
-    def at(bar):
-        return float(out_beats[min(nb, int(round(bar * nb / 16)))] / length)
-
+    # --- EQ mix (fractions of the transition; the middle is the middle downbeat)
+    mid = float(out_beats[nb // 2] / length)
     e = 0.004
-    bass_in = 8 if compatible else 12
-    gains_a = {
-        "drums": ramp(n, [(0, 1), (at(8), 1), (at(8) + e, 0), (1, 0)]),
-        "bass": ramp(n, [(0, 1), (at(8), 1), (at(8) + e, 0), (1, 0)]),
-        "other": ramp(n, [(0, 1), (at(7), 1), (at(8), 0), (1, 0)]),
-        "vocals": ramp(n, [(0, 1), (at(12), 1), (at(13), 0), (1, 0)]),
-    }
-    gains_b = {
-        "drums": ramp(n, [(0, 0), (at(2), 0), (at(4), 1), (1, 1)]),
-        "bass": ramp(n, [(0, 0), (at(bass_in), 0), (at(bass_in) + e, 1), (1, 1)]),
-        "other": ramp(n, [(0, 0), (at(12), 0), (at(13), 1), (1, 1)]),
-        "vocals": ramp(n, [(0, 0), (at(13), 0), (at(14), 1), (1, 1)]),
-    }
-    a_part = a_seg.copy()
-    b_part = b_seg.copy()
-    full = ramp(n, [(0, 1), (1, 1)])
-    for name in sa:
-        a_part += sa[name][:, :n] * (gains_a.get(name, full) - 1.0)
-        b_part += sb[name][:, :n] * (gains_b.get(name, full) - 1.0)
-    b_presence = np.maximum.reduce([gains_b[k] for k in gains_b])
-    a_presence = np.maximum.reduce([gains_a[k] for k in gains_a])
-    mix = a_part * np.minimum(1.0, a_presence * 4) + b_part * np.minimum(1.0, b_presence * 4)
-    mix = soft_limit(mix)
+    a_low, a_high = low_high(a_seg)
+    b_low, b_high = low_high(b_seg)
+    g_a_high = ramp(n, [(0, 1), (mid, 1), (1, 0)])
+    g_a_low = ramp(n, [(0, 1), (mid, 1), (mid + e, 0), (1, 0)])
+    g_b_high = ramp(n, [(0, 0), (mid, 1), (1, 1)])
+    g_b_low = ramp(n, [(0, 0), (mid, 0), (mid + e, 1), (1, 1)])
+    # equal-power treble crossfade
+    mix = a_low * g_a_low + a_high * np.sin(g_a_high * math.pi / 2) + b_low * g_b_low + b_high * np.sin(g_b_high * math.pi / 2)
+    mix = soft_limit(mix.astype(np.float32))
 
     a_out = a_start + i0 / SR
-    b_in = b_abs + nb * pb  # B carries on from here at its own tempo, exactly where the ramp ended
-    # Sample-exact joins: the first and last 50 ms melt into the untouched songs
+    b_in = b_abs + nb * pb
     xf = int(JOIN * SR)
     orig_a = a[:, i0: i0 + xf]
     orig_b = decode(b_path, b_in - xf / SR, xf / SR + 0.02)[:, :xf]
@@ -493,14 +512,14 @@ def plan_and_render(sep, a_path, b_path, workdir="/tmp"):
     if orig_b.shape[1] == xf:
         mix[:, -xf:] = mix[:, -xf:] * (1 - w) + orig_b * w
     meta.update({"style": "beatmatch", "bars": bars, "bpmFrom": round(60 / pa, 2), "bpmTo": round(60 / pb, 2),
-                 "beatMultiple": mult})
+                 "cutA_s": round(a_len - cue_a - length_a, 1), "introB_s": round(cue_b - first_down, 1)})
     return mix, a_out, b_in, SR, meta, t0
 
 
 def crossfade(a_path, b_path, a_start, a, b_start, b_dur, meta, t0):
-    """Tempos too different for beat matching: a smooth equal-power 10-second crossfade."""
+    """No beat matching possible: a smooth equal-power 6-second crossfade, A's real end into B's real start."""
     _, b_rate = probe(b_path)
-    fade = min(10.0, a.shape[1] / SR / 2)
+    fade = min(6.0, a.shape[1] / SR / 2)
     n = int(fade * SR)
     a_seg = a[:, -n:]
     b = decode(b_path, b_start, fade + 1)[:, :n]
@@ -542,7 +561,7 @@ class Worker:
         self.jobs.put(job)
 
     def loop(self):
-        self.sep = Separator()
+        self.sep = None  # source separation is not used by the transitions any more (EQ mix)
         while True:
             job = self.jobs.get()
             meta_path = os.path.join(job["out"], job["key"] + ".json")
@@ -555,7 +574,7 @@ class Worker:
                              "length": round(mix.shape[1] / SR, 3), "seconds": round(time.time() - t0, 1)})
                 log.info("%s: %s in %.1fs (%s)", job["key"], meta["style"], meta["seconds"],
                          ", ".join(f"{k}={v}" for k, v in meta.items() if k in (
-                             "bpmFrom", "bpmTo", "tempoA", "tempoB", "keyA", "keyB", "bars", "syncA_ms", "syncB_ms", "reason")))
+                             "bpmFrom", "bpmTo", "keyA", "keyB", "bars", "syncA_ms", "syncB_ms", "cutA_s", "introB_s", "reason")))
             except Exception as e:  # noqa: BLE001
                 log.exception("%s failed", job["key"])
                 meta = {"status": "failed", "error": str(e)[:300]}
@@ -585,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             sep = WORKER.sep
-            return self.reply(200, {"ok": True, "ready": sep is not None, "device": sep.device if sep else None})
+            return self.reply(200, {"ok": True, "ready": True})
         self.reply(404, {"error": "not found"})
 
     def do_POST(self):

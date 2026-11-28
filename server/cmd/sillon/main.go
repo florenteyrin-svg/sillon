@@ -45,6 +45,7 @@ func main() {
 		log.Printf("first start: account %q created with password %s (change it with SILLON_ADMIN_PASSWORD before the first start, or keep this one)", cfg.AdminUser, pass)
 	}
 
+	scanner.SkipAtmos = !cfg.IncludeAtmos
 	hub := events.NewHub()
 	sc := scanner.New(cfg.MusicDir, d, hub)
 	covers := &subsonic.Covers{DB: d, MusicDir: cfg.MusicDir, CacheDir: filepath.Join(cfg.DataDir, "covers")}

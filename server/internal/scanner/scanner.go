@@ -2,6 +2,7 @@
 package scanner
 
 import (
+	"errors"
 	"io/fs"
 	"log"
 	"os"
@@ -112,7 +113,9 @@ func (s *Scanner) Scan() error {
 			for j := range jobs {
 				t, err := probe(s.root, j.rel, j.info)
 				if err != nil {
-					log.Printf("scan: skip %s: %v", j.rel, err)
+					if !errors.Is(err, ErrSkipped) {
+						log.Printf("scan: skip %s: %v", j.rel, err)
+					}
 					continue
 				}
 				results <- t
@@ -264,7 +267,9 @@ func (s *Scanner) UpdatePaths(fulls []string) {
 		}
 		t, err := probe(s.root, rel, info)
 		if err != nil {
-			log.Printf("watch: skip %s: %v", rel, err)
+			if !errors.Is(err, ErrSkipped) {
+				log.Printf("watch: skip %s: %v", rel, err)
+			}
 			continue
 		}
 		added = append(added, t)

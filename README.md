@@ -8,6 +8,8 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
   est dans la bibliothèque en ~2 secondes, sans scan à attendre.
 - **Logo de qualité** pour chaque titre et album : `hires` (plus de 16 bit ou plus de 48 kHz),
   `cd` (16 bit / 44,1 kHz, 1411 kbps), `atmos` (Dolby Atmos) ou `lossy` (MP3, AAC…).
+- **Pas de doublons Dolby Atmos** : les fichiers Atmos sont ignorés (les mêmes albums existent en FLAC).
+  `SILLON_INCLUDE_ATMOS=true` dans le `.env` pour les garder.
 - **Respecte les fichiers `.ignore`** comme Jellyfin : un dossier qui en contient un (Mes Découvertes,
   dossiers `cover` des pochettes animées) est ignoré.
 - **Compatible Subsonic / OpenSubsonic** : Music Assistant (donc Home Assistant), Symfonium, etc.
