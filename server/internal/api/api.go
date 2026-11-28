@@ -51,6 +51,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/catalog/play", a.auth(a.catalogPlay))
 	mux.HandleFunc("GET /api/catalog/stream/{id}", a.auth(a.catalogStream))
 	mux.HandleFunc("GET /api/recent", a.auth(a.recent))
+	mux.HandleFunc("POST /api/import/jellyfin", a.auth(a.importJellyfin))
 	mux.HandleFunc("GET /api/mix/transition", a.auth(a.mixTransition))
 	mux.HandleFunc("GET /api/mix/file/{key}", a.auth(a.mixFile))
 	mux.HandleFunc("GET /api/mix/segment", a.auth(a.mixSegment))
@@ -498,9 +499,10 @@ func (a *API) mixSegment(w http.ResponseWriter, r *http.Request, u *db.User) {
 			jsonError(w, 404, "unknown previous song")
 			return
 		}
-		if prevT, prevKey = a.Mix.Done(prev.Path, song.Path); prevT == nil {
-			jsonError(w, http.StatusConflict, "transition from the previous song not ready")
-			return
+		// Not ready (or lost when the server restarted): the song plays from its start rather than not at all
+		prevT, prevKey = a.Mix.Done(prev.Path, song.Path)
+		if prevT == nil {
+			prevKey = ""
 		}
 	}
 	if id := r.Form.Get("next"); id != "" {
@@ -509,14 +511,17 @@ func (a *API) mixSegment(w http.ResponseWriter, r *http.Request, u *db.User) {
 			jsonError(w, 404, "unknown next song")
 			return
 		}
-		if nextT, _ = a.Mix.Done(song.Path, next.Path); nextT == nil {
-			jsonError(w, http.StatusConflict, "transition to the next song not ready")
-			return
-		}
+		nextT, _ = a.Mix.Done(song.Path, next.Path)
+	}
+	// A DJ problem must never stop the music: the plain song is sent instead
+	if prevT == nil && nextT == nil {
+		a.Subsonic.ServeTrack(w, r, song)
+		return
 	}
 	p, err := a.Mix.Segment(song.Path, song.Duration, prevKey, prevT, nextT)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("mix: segment %s: %v (plain song sent)", song.Title, err)
+		a.Subsonic.ServeTrack(w, r, song)
 		return
 	}
 	w.Header().Set("Content-Type", "audio/flac")

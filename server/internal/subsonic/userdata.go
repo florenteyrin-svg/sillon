@@ -69,6 +69,32 @@ func (s *Server) getStarred(w http.ResponseWriter, r *http.Request, u *db.User) 
 	return M{"starred": m}, e
 }
 
+// FavoritesID is the "Favoris" playlist: the songs marked with the heart, last one first. It is listed
+// with the other playlists (app, Android Auto, Music Assistant) and cannot be edited as a playlist.
+const FavoritesID = "pl-favoris"
+
+type favoritesList struct {
+	p      *db.Playlist
+	tracks []*db.Track
+}
+
+func (s *Server) favorites(u *db.User) (*favoritesList, error) {
+	tracks, err := s.DB.QueryTracks(`JOIN stars st ON st.item_id = t.id AND st.user_id = ? ORDER BY st.created_at DESC, t.title`, u.ID)
+	if err != nil {
+		return nil, err
+	}
+	p := &db.Playlist{ID: FavoritesID, UserID: u.ID, Owner: u.Name, Name: "Favoris", Rules: "favorites", SongCount: len(tracks)}
+	for _, t := range tracks {
+		p.Duration += t.Duration
+	}
+	if len(tracks) > 0 {
+		var last int64
+		s.DB.QueryRow(`SELECT MAX(created_at) FROM stars WHERE user_id = ?`, u.ID).Scan(&last)
+		p.CreatedAt, p.UpdatedAt = last, last
+	}
+	return &favoritesList{p, tracks}, nil
+}
+
 // ---- plays ----
 
 func (s *Server) scrobble(w http.ResponseWriter, r *http.Request, u *db.User) (M, *apiError) {
@@ -103,7 +129,7 @@ func (s *Server) playlist(p *db.Playlist) M {
 		"songCount": p.SongCount, "duration": int(p.Duration + 0.5), "created": iso(p.CreatedAt),
 		"changed": iso(p.UpdatedAt), "coverArt": p.ID, "readonly": p.Smart(),
 		// Sillon's own field: the app shows smart playlists apart
-		"smart": p.Smart(),
+		"smart": p.Smart() && p.ID != FavoritesID,
 	}
 	return m
 }
@@ -125,7 +151,10 @@ func (s *Server) getPlaylists(w http.ResponseWriter, r *http.Request, u *db.User
 	if err != nil {
 		return nil, errGeneric(err)
 	}
-	out := make([]M, 0, len(ps))
+	out := make([]M, 0, len(ps)+1)
+	if fav, err := s.favorites(u); err == nil {
+		out = append(out, s.playlist(fav.p))
+	}
 	for _, p := range ps {
 		if p.Smart() {
 			if ts, err := smart.Tracks(s.DB, p.Rules, u.ID); err == nil {
@@ -141,6 +170,15 @@ func (s *Server) getPlaylists(w http.ResponseWriter, r *http.Request, u *db.User
 }
 
 func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request, u *db.User) (M, *apiError) {
+	if r.Form.Get("id") == FavoritesID {
+		fav, err := s.favorites(u)
+		if err != nil {
+			return nil, errGeneric(err)
+		}
+		m := s.playlist(fav.p)
+		m["entry"] = s.songs(fav.tracks, s.userData(u))
+		return M{"playlist": m}, nil
+	}
 	p, err := s.DB.PlaylistByID(r.Form.Get("id"))
 	if err != nil {
 		return nil, errGeneric(err)

@@ -24,6 +24,8 @@ Serveur de musique auto-hébergé, simple et rapide, avec son appli Android (à 
   d'un titre et le début du suivant, pendant la lecture (conteneur `sillon-dj`, carte NVIDIA si possible).
 - **Pochettes animées** comme Apple Music : celles qu'à la carte enregistre sont fournies à l'appli.
 - **Playlists intelligentes** calculées en quelques millisecondes.
+- **Playlist Favoris** : les titres marqués du cœur, avec les autres playlists (appli, Android Auto,
+  Music Assistant). Les favoris Jellyfin s'importent depuis l'appli (Bibliothèque › Importer mes favoris Jellyfin).
 - **Reprise de lecture** sur n'importe quel appareil (file d'attente et position gardées par le serveur).
 - Léger : ~30 Mo de RAM pour 22 000 titres.
 
@@ -83,7 +85,8 @@ L'appli est dans [`android/`](android/) (Kotlin, Jetpack Compose, Media3) :
 - **Bibliothèque** : playlists (et intelligentes), artistes, albums, tous les titres, favoris.
 - **Recherche** : ta bibliothèque et Apple Music. Un appui sur un titre Apple Music le lance tout de suite ;
   la flèche le télécharge dans ta bibliothèque.
-- **Lecture** : logo HI-RES / CD / ATMOS / MP3, pochette animée, file d'attente, aléatoire, répétition.
+- **Lecture** : logo HI-RES / CD / MP3, pochette animée, cœur Favoris, file d'attente, aléatoire, répétition.
+  Un appui sur la pochette ou le titre ouvre l'album, sur le nom de l'artiste ouvre l'artiste.
 - **Toujours prête** : la file d'attente et la position sont gardées sur le téléphone et rechargées avant
   tout le reste, donc rien à charger en ouvrant l'appli ou en montant en voiture.
 - **Android Auto** : Récents, Playlists, Albums, Artistes, recherche et commande vocale.

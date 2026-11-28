@@ -63,6 +63,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, u *db.User) *api
 	return nil
 }
 
+// ServeTrack sends a library file as it is.
+func (s *Server) ServeTrack(w http.ResponseWriter, r *http.Request, t *db.Track) {
+	w.Header().Set("Content-Type", contentTypes[t.Suffix])
+	http.ServeFile(w, r, filepath.Join(s.MusicDir, filepath.FromSlash(t.Path)))
+}
+
 func transcode(w http.ResponseWriter, r *http.Request, full, format string, kbps, offset int) {
 	args := []string{"-v", "error"}
 	if offset > 0 {
@@ -179,6 +185,10 @@ func (c *Covers) albumFor(id string) string {
 	case strings.HasPrefix(id, "ar-"):
 		var a string
 		c.DB.QueryRow(`SELECT id FROM albums WHERE artist_id = ? ORDER BY year DESC LIMIT 1`, id).Scan(&a)
+		return a
+	case id == FavoritesID: // the song marked last
+		var a string
+		c.DB.QueryRow(`SELECT t.album_id FROM stars st JOIN tracks t ON t.id = st.item_id ORDER BY st.created_at DESC LIMIT 1`).Scan(&a)
 		return a
 	case strings.HasPrefix(id, "pl-"):
 		var a string

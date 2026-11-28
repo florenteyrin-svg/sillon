@@ -177,3 +177,9 @@ internal data class SubsonicError(val code: Int = 0, val message: String = "")
 
 @Serializable
 internal data class SubsonicEnvelope(@SerialName("subsonic-response") val response: kotlinx.serialization.json.JsonObject)
+
+@Serializable
+data class JellyfinImport(val total: Int = 0, val imported: Int = 0, val missing: List<String> = emptyList())
+
+/** The "Favoris" playlist the server lists with the others: the songs marked with the heart. */
+const val FAVORITES_ID = "pl-favoris"

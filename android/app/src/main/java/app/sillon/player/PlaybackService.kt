@@ -129,7 +129,19 @@ class PlaybackService : MediaLibraryService() {
     private var retriedId: String? = null
 
     private fun recoverFromError() {
-        val id = player.currentMediaItem?.mediaId ?: return
+        val item = player.currentMediaItem ?: return
+        val id = item.mediaId
+        // A DJ segment that cannot be played: the plain song right away, the music never stops for the mix
+        val e = item.mediaMetadata.extras
+        if (!e?.getString(Extras.DJ_PREV).isNullOrEmpty() || !e?.getString(Extras.DJ_NEXT).isNullOrEmpty()) {
+            val index = player.currentMediaItemIndex
+            val plain = item.toQueueTrack().copy(mixable = false).toMediaItem(api)
+            player.replaceMediaItem(index, plain)
+            player.seekTo(index, 0)
+            player.prepare()
+            player.play()
+            return
+        }
         if (id != retriedId) { retriedId = id; retries = 0 }
         if (retries >= 3) return
         retries++
@@ -291,7 +303,10 @@ class PlaybackService : MediaLibraryService() {
             }
         }.filter { it.id != cur.mediaId }
         if (songs.isEmpty()) return false
-        player.addMediaItems(player.currentMediaItemIndex + 1, songs.map { it.toQueueTrack(mixable).toMediaItem(api) })
+        // With the DJ mix, the song playing already flows into the next one: the songs go right after that one
+        val mixedInto = !e?.getString(Extras.DJ_NEXT).isNullOrEmpty()
+        val at = (player.currentMediaItemIndex + if (mixedInto) 2 else 1).coerceAtMost(player.mediaItemCount)
+        player.addMediaItems(at, songs.map { it.toQueueTrack(mixable).toMediaItem(api) })
         return true
     }
 

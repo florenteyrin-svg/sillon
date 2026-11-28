@@ -1,6 +1,8 @@
 package app.sillon.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -84,6 +86,8 @@ fun LibraryScreen() {
     val ctx = LocalApp.current
     val status by cached("library-status", LibraryStatus.serializer()) { ctx.api.status() }
     val newest by cached("home-newest", ListSerializer(Album.serializer())) { ctx.api.albumList("newest", 20) }
+    var showImport by remember { mutableStateOf(false) }
+    if (showImport) JellyfinImportDialog { showImport = false }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
             val s = status
@@ -92,7 +96,8 @@ fun LibraryScreen() {
             NavRow("Artistes") { ctx.nav.navigate("artists") }
             NavRow("Albums") { ctx.nav.navigate("albums") }
             NavRow("Titres") { ctx.nav.navigate("songs") }
-            NavRow("Favoris") { ctx.nav.navigate("starred") }
+            NavRow("Favoris") { ctx.openPlaylist(app.sillon.data.FAVORITES_ID) }
+            NavRow("Importer mes favoris Jellyfin") { showImport = true }
             Spacer(Modifier.height(16.dp))
             SectionTitle("Ajoutés récemment")
         }
@@ -297,4 +302,50 @@ fun PlaylistScreen(id: String) {
             TrackRow(s.title, s.artist, ctx.api.coverUrl(s.albumId, 150), s.quality) { ctx.play(p.entry.map { it.toQueueTrack() }, i, mixable = true) }
         }
     }
+}
+
+/** Brings the Jellyfin favourites into the "Favoris" playlist. The password goes to Jellyfin only, nothing is kept. */
+@Composable
+private fun JellyfinImportDialog(onClose: () -> Unit) {
+    val ctx = LocalApp.current
+    var url by remember { mutableStateOf("http://10.0.0.2:8096") }
+    var user by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!busy) onClose() },
+        title = { Text("Favoris Jellyfin") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (result != null) Text(result!!)
+                else {
+                    Text("Les titres en favori dans Jellyfin sont ajoutés à ta playlist Favoris.",
+                        style = MaterialTheme.typography.bodyMedium)
+                    androidx.compose.material3.OutlinedTextField(url, { url = it.trim() }, label = { Text("Adresse de Jellyfin") }, singleLine = true)
+                    androidx.compose.material3.OutlinedTextField(user, { user = it.trim() }, label = { Text("Utilisateur Jellyfin") }, singleLine = true)
+                    androidx.compose.material3.OutlinedTextField(password, { password = it }, label = { Text("Mot de passe Jellyfin") }, singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                    if (busy) Text("Import en cours…", color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        },
+        confirmButton = {
+            if (result != null) androidx.compose.material3.TextButton(onClick = onClose) { Text("OK") }
+            else androidx.compose.material3.TextButton(enabled = !busy && url.length > 8 && user.isNotEmpty(), onClick = {
+                busy = true
+                ctx.scope.launch {
+                    runCatching { ctx.api.importJellyfin(url, user, password) }
+                        .onSuccess { r ->
+                            ctx.loadFavorites()
+                            result = "${r.imported} favoris sur ${r.total} ajoutés à ta playlist Favoris." +
+                                (if (r.missing.isNotEmpty()) "\n\nPas trouvés dans ta bibliothèque :\n" + r.missing.joinToString("\n") else "")
+                        }
+                        .onFailure { ctx.toast.value = it.message }
+                    busy = false
+                }
+            }) { Text("Importer") }
+        },
+        dismissButton = { if (result == null) androidx.compose.material3.TextButton(enabled = !busy, onClick = onClose) { Text("Annuler") } },
+    )
 }

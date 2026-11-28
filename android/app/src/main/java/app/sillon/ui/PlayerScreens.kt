@@ -25,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
@@ -138,6 +140,8 @@ fun NowPlayingScreen(onClose: () -> Unit) {
             ) {
                 if (art != null) AsyncImage(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 if (t != null && t.animatedCover && !t.isCatalog && t.albumId.isNotEmpty()) AnimatedCover(ctx.api.animatedCoverUrl(t.albumId))
+                // The cover opens the album, like Apple Music
+                if (t != null) Box(Modifier.fillMaxSize().clickableNoRipple { ctx.showAlbumOf(t) })
             }
             Column(Modifier.weight(1f).fillMaxWidth().navigationBarsPadding().padding(horizontal = 24.dp)) {
             if (t == null) { Message("Rien en lecture"); return@Column }
@@ -161,10 +165,20 @@ fun NowPlayingScreen(onClose: () -> Unit) {
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(t.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(t.artist, color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // Title: the album; artist: the artist page. Nothing here changes the song playing.
+                    Text(t.title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickableNoRipple { ctx.showAlbumOf(t) })
+                    Text(t.artist, color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickableNoRipple { ctx.showArtistOf(t) })
                 }
                 QualityBadge(t.quality, onDark = true, large = true)
+                if (!t.isCatalog) {
+                    val fav = t.id in ctx.favorites.value
+                    IconButton(onClick = { ctx.toggleFavorite(t.id) }) {
+                        Icon(if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (fav) "Retirer des Favoris" else "Ajouter aux Favoris",
+                            tint = if (fav) Color(0xFFFF4D6D) else Color.White, modifier = Modifier.size(28.dp))
+                    }
+                }
             }
 
             val dur = s.durationMs.coerceAtLeast(1)

@@ -92,6 +92,7 @@ private fun MainScaffold(app: SillonApp, player: PlayerConnection) {
     val showPlayer = remember { mutableStateOf(false) }
     val toast = remember { mutableStateOf<String?>(null) }
     val ctx = remember { AppContext(app, player, nav, scope, showPlayer, toast) }
+    LaunchedEffect(Unit) { ctx.loadFavorites() }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(toast.value) {
         toast.value?.let { snackbar.showSnackbar(it); toast.value = null }

@@ -28,6 +28,43 @@ class AppContext(
 ) {
     val api get() = app.api
 
+    /** Songs marked with the heart (kept in the "Favoris" playlist on the server). */
+    val favorites = mutableStateOf<Set<String>>(emptySet())
+
+    fun loadFavorites() {
+        scope.launch { runCatching { api.starred() }.onSuccess { list -> favorites.value = list.map { it.id }.toSet() } }
+    }
+
+    fun toggleFavorite(id: String) {
+        val on = id !in favorites.value
+        favorites.value = if (on) favorites.value + id else favorites.value - id
+        scope.launch {
+            runCatching { api.star(id, on) }
+                .onSuccess { toast.value = if (on) "Ajouté aux Favoris" else "Retiré des Favoris" }
+                .onFailure {
+                    favorites.value = if (on) favorites.value - id else favorites.value + id
+                    toast.value = "Favori impossible : ${it.message}"
+                }
+        }
+    }
+
+    /** From the player: the album or the artist of the song playing (library or Apple Music). */
+    fun showAlbumOf(t: QueueTrack) {
+        if (t.albumId.isEmpty()) return
+        showPlayer.value = false
+        if (t.isCatalog) openCatalogAlbum(t.albumId) else openAlbum(t.albumId)
+    }
+
+    fun showArtistOf(t: QueueTrack) {
+        if (t.isCatalog) { showAlbumOf(t); return } // Apple Music songs: their album page links to the artist
+        scope.launch {
+            val id = t.artistId.ifEmpty { runCatching { api.song(t.id).artistId }.getOrDefault("") }
+            if (id.isEmpty()) { toast.value = "Artiste introuvable sur le serveur"; return@launch }
+            showPlayer.value = false
+            openArtist(id)
+        }
+    }
+
     fun openAlbum(id: String) = nav.navigate("album/$id")
     fun openArtist(id: String) = nav.navigate("artist/$id")
     fun openPlaylist(id: String) = nav.navigate("playlist/$id")

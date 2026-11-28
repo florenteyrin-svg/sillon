@@ -185,6 +185,21 @@ class SillonApi(private val settings: Settings) {
         })
     }
 
+    /** Marks as favourites the songs that are favourites in Jellyfin (the password only goes to Jellyfin, through the server). */
+    suspend fun importJellyfin(url: String, user: String, password: String): JellyfinImport = withContext(Dispatchers.IO) {
+        val body = buildJsonObject { put("url", url); put("user", user); put("password", password) }
+        val req = Request.Builder().url("$base/api/import/jellyfin").header("Authorization", "Bearer ${settings.apiKey}")
+            .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+        http.newBuilder().readTimeout(3, java.util.concurrent.TimeUnit.MINUTES).build().newCall(req).execute().use { resp ->
+            val text = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) {
+                val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.toString()?.trim('"') }.getOrNull()
+                throw ApiException(msg ?: "Le serveur répond ${resp.code}")
+            }
+            json.decodeFromString(text)
+        }
+    }
+
     /** DJ transition from the playing song to the next one; ask again until status is "done". */
     suspend fun mixTransition(from: String, to: String): MixTransition =
         json.decodeFromString(api("GET", "/api/mix/transition?from=$from&to=$to"))
