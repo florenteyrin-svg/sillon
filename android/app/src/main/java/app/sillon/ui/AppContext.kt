@@ -31,8 +31,25 @@ class AppContext(
     /** Songs marked with the heart (kept in the "Favoris" playlist on the server). */
     val favorites = mutableStateOf<Set<String>>(emptySet())
 
+    /** Albums marked with the heart on their page ("Albums préférés", also in Android Auto). */
+    val favoriteAlbums = mutableStateOf<Set<String>>(emptySet())
+
     fun loadFavorites() {
         scope.launch { runCatching { api.starred() }.onSuccess { list -> favorites.value = list.map { it.id }.toSet() } }
+        scope.launch { runCatching { api.starredAlbums() }.onSuccess { list -> favoriteAlbums.value = list.map { it.id }.toSet() } }
+    }
+
+    fun toggleFavoriteAlbum(id: String) {
+        val on = id !in favoriteAlbums.value
+        favoriteAlbums.value = if (on) favoriteAlbums.value + id else favoriteAlbums.value - id
+        scope.launch {
+            runCatching { api.star(id, on) }
+                .onSuccess { toast.value = if (on) "Ajouté aux Albums préférés" else "Retiré des Albums préférés" }
+                .onFailure {
+                    favoriteAlbums.value = if (on) favoriteAlbums.value - id else favoriteAlbums.value + id
+                    toast.value = "Impossible : ${it.message}"
+                }
+        }
     }
 
     fun toggleFavorite(id: String) {

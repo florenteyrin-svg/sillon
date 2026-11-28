@@ -157,6 +157,7 @@ private fun MainScaffold(app: SillonApp, player: PlayerConnection) {
                     composable("playlists") { PlaylistsScreen() }
                     composable("songs") { SongsScreen() }
                     composable("starred") { StarredScreen() }
+                    composable("favorite-albums") { FavoriteAlbumsScreen() }
                     composable("album/{id}") { AlbumScreen(it.arguments?.getString("id") ?: "") }
                     composable("artist/{id}") { ArtistScreen(it.arguments?.getString("id") ?: "") }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments?.getString("id") ?: "") }

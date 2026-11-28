@@ -135,6 +135,9 @@ class SillonApi(private val settings: Settings) {
 
     suspend fun randomSongs(size: Int): List<Song> = subsonic("getRandomSongs", "size" to size).at("randomSongs", "song") ?: emptyList()
 
+    /** Albums marked with the heart on their page (separate from the favourite songs), last one first. */
+    suspend fun starredAlbums(): List<Album> = subsonic("getStarred2").at("starred2", "album") ?: emptyList()
+
     suspend fun starred(): List<Song> = subsonic("getStarred2").at("starred2", "song") ?: emptyList()
 
     suspend fun star(id: String, on: Boolean) { subsonic(if (on) "star" else "unstar", "id" to id) }

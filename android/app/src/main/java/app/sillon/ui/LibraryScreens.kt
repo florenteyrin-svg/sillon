@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.FilledTonalButton
@@ -98,6 +100,7 @@ fun LibraryScreen() {
             NavRow("Albums") { ctx.nav.navigate("albums") }
             NavRow("Titres") { ctx.nav.navigate("songs") }
             NavRow("Favoris") { ctx.openPlaylist(app.sillon.data.FAVORITES_ID) }
+            NavRow("Albums préférés") { ctx.nav.navigate("favorite-albums") }
             NavRow("Importer mes favoris Jellyfin") { showImport = true }
             Spacer(Modifier.height(16.dp))
             SectionTitle("Ajoutés récemment")
@@ -202,6 +205,24 @@ private fun CoroutineScope.launchShuffleAll(ctx: AppContext) {
 }
 
 @Composable
+fun FavoriteAlbumsScreen() {
+    val ctx = LocalApp.current
+    val albums by cached("favorite-albums", ListSerializer(Album.serializer())) { ctx.api.starredAlbums() }
+    // Follows the hearts changed meanwhile
+    val list = albums.orEmpty().filter { it.id in ctx.favoriteAlbums.value || ctx.favoriteAlbums.value.isEmpty() }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+        item { BackBar(); ScreenTitle("Albums préférés", "${list.size} albums") }
+        if (albums != null && list.isEmpty()) item { Message("Touche le cœur sur la page d'un album pour l'ajouter ici") }
+        items(list.chunked(2)) { pair ->
+            Row(Modifier.padding(horizontal = 20.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                pair.forEach { a -> Box(Modifier.weight(1f)) { AlbumTile(a.name, a.artist, ctx.api.coverUrl(a.id, 400), a.quality) { ctx.openAlbum(a.id) } } }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
 fun StarredScreen() {
     val ctx = LocalApp.current
     val songs by cached("starred", ListSerializer(Song.serializer())) { ctx.api.starred() }
@@ -235,6 +256,13 @@ fun AlbumScreen(id: String) {
                     QualityBadge(a.quality)
                     Text(listOfNotNull(a.year.takeIf { it > 0 }?.toString(), "${a.songCount} titres", formatDuration(a.duration)).joinToString(" · "),
                         color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                    // Favourite album (not its songs): listed in "Albums préférés" and first in Android Auto
+                    val fav = a.id in ctx.favoriteAlbums.value
+                    IconButton(onClick = { ctx.toggleFavoriteAlbum(a.id) }) {
+                        Icon(if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                            if (fav) "Retirer des Albums préférés" else "Ajouter aux Albums préférés",
+                            tint = if (fav) androidx.compose.ui.graphics.Color(0xFFFF4D6D) else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
             // An album plays in order, never mixed (DJ mix is for playlists and all songs)

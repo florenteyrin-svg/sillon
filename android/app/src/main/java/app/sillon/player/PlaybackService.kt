@@ -209,11 +209,15 @@ class PlaybackService : MediaLibraryService() {
 
     // ---- Android Auto and other controllers ----
 
-    private fun browsable(id: String, title: String, subtitle: String? = null, art: String? = null, mediaType: Int = MediaMetadata.MEDIA_TYPE_FOLDER_MIXED) =
+    private fun browsable(id: String, title: String, subtitle: String? = null, art: String? = null,
+                          mediaType: Int = MediaMetadata.MEDIA_TYPE_FOLDER_MIXED, group: String? = null) =
         MediaItem.Builder().setMediaId(id).setMediaMetadata(
             MediaMetadata.Builder().setTitle(title).setSubtitle(subtitle).setArtist(subtitle)
                 .setArtworkUri(art?.let { android.net.Uri.parse(it) })
-                .setIsBrowsable(true).setIsPlayable(false).setMediaType(mediaType).build()
+                .setIsBrowsable(true).setIsPlayable(false).setMediaType(mediaType)
+                // Android Auto shows items with the same group under one heading
+                .setExtras(group?.let { Bundle().apply { putString(androidx.media3.session.MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, it) } })
+                .build()
         ).build()
 
     private fun playable(parent: String, tracks: List<QueueTrack>): List<MediaItem> {
@@ -237,9 +241,17 @@ class PlaybackService : MediaLibraryService() {
         parentId == PLAYLISTS -> api.playlists().map {
             browsable("pl:${it.id}", it.name, "${it.songCount} titres", api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_PLAYLIST)
         }
-        parentId == ALBUMS -> api.albumList("newest", 100).map {
-            browsable("al:${it.id}", it.name, listOfNotNull(it.artist, qualityLabel(it.quality)).joinToString(" · "),
-                api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ALBUM)
+        // Favourite albums first (no searching while driving), then the newest ones
+        parentId == ALBUMS -> {
+            val favs = runCatching { api.starredAlbums() }.getOrDefault(emptyList())
+            val ids = favs.map { it.id }.toSet()
+            favs.map {
+                browsable("al:${it.id}", it.name, listOfNotNull(it.artist, qualityLabel(it.quality)).joinToString(" · "),
+                    api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ALBUM, group = "Albums préférés")
+            } + api.albumList("newest", 100).filter { it.id !in ids }.map {
+                browsable("al:${it.id}", it.name, listOfNotNull(it.artist, qualityLabel(it.quality)).joinToString(" · "),
+                    api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ALBUM, group = if (favs.isEmpty()) null else "Ajoutés récemment")
+            }
         }
         parentId == ARTISTS -> api.artists().map {
             browsable("ar:${it.id}", it.name, null, api.coverUrl(it.id, 300), MediaMetadata.MEDIA_TYPE_ARTIST)
