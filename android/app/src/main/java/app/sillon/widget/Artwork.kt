@@ -75,11 +75,23 @@ object Artwork {
      * content:// addresses the launcher can read (served by FrameProvider, which serves
      * local files by path). Made once per album art; older frames are deleted.
      */
+    private fun frameFiles(context: Context, key: String, count: Int): List<File> {
+        // "v2": frames made by older versions could hold the previous song's art under this song's name
+        val name = "v2_" + Integer.toHexString(key.hashCode())
+        return List(count) { i -> File(File(context.cacheDir, "widget_label_frames"), "${name}_${count}_$i.png") }
+    }
+
+    private fun uris(context: Context, files: List<File>) =
+        files.map { Uri.Builder().scheme("content").authority(context.packageName).path(it.absolutePath).build() }
+
+    /** The frames of this art if they are already made (never makes them: that is done off the main thread). */
+    fun readyLabelFiles(context: Context, key: String, count: Int): List<Uri>? =
+        frameFiles(context, key, count).takeIf { f -> f.all { it.isFile } }?.let { uris(context, it) }
+
     fun rotatedLabelFiles(context: Context, key: String, source: Bitmap, count: Int, sizePx: Int): List<Uri>? {
         return try {
-            val dir = File(context.cacheDir, "widget_label_frames")
-            val name = Integer.toHexString(key.hashCode())
-            val files = List(count) { i -> File(dir, "${name}_${count}_$i.png") }
+            val files = frameFiles(context, key, count)
+            val dir = files.first().parentFile!!
             if (!files.all { it.isFile }) {
                 dir.deleteRecursively()
                 dir.mkdirs()
@@ -95,7 +107,7 @@ object Artwork {
                     frame.recycle()
                 }
             }
-            files.map { Uri.Builder().scheme("content").authority(context.packageName).path(it.absolutePath).build() }
+            uris(context, files)
         } catch (e: Exception) {
             Log.w(TAG, "Could not make the spinning label", e)
             null

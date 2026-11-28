@@ -89,6 +89,13 @@ func (d *DB) Star(userID int64, ids []string) error {
 	return nil
 }
 
+// StarAt marks a favourite with the date it was added; a favourite already there takes the older date.
+func (d *DB) StarAt(userID int64, id string, at int64) error {
+	_, err := d.Exec(`INSERT INTO stars (user_id, item_id, created_at) VALUES (?, ?, ?)
+		ON CONFLICT (user_id, item_id) DO UPDATE SET created_at = MIN(created_at, excluded.created_at)`, userID, id, at)
+	return err
+}
+
 func (d *DB) Unstar(userID int64, ids []string) error {
 	for _, id := range ids {
 		if _, err := d.Exec(`DELETE FROM stars WHERE user_id = ? AND item_id = ?`, userID, id); err != nil {

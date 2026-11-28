@@ -17,6 +17,13 @@ type Song struct {
 	AlbumArtist string   `json:"AlbumArtist"`
 	Artists     []string `json:"Artists"`
 	Path        string   `json:"Path"`
+	DateCreated string   `json:"DateCreated"` // when the song was added to Jellyfin
+}
+
+// Added is when the song was added to Jellyfin (zero when unknown).
+func (s Song) Added() time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s.DateCreated)
+	return t
 }
 
 const client = `MediaBrowser Client="Sillon", Device="Sillon", DeviceId="sillon-import", Version="1.0"`
@@ -57,7 +64,7 @@ func Favorites(server, user, password string) ([]Song, error) {
 
 	q := url.Values{
 		"Filters": {"IsFavorite"}, "IncludeItemTypes": {"Audio"}, "Recursive": {"true"},
-		"Fields": {"Path"}, "SortBy": {"DatePlayed,SortName"}, "SortOrder": {"Descending"},
+		"Fields": {"Path,DateCreated"}, "SortBy": {"DateCreated,SortName"}, "SortOrder": {"Descending"},
 	}
 	req, _ = http.NewRequest("GET", server+"/Users/"+auth.User.ID+"/Items?"+q.Encode(), nil)
 	req.Header.Set("Authorization", client+`, Token="`+auth.AccessToken+`"`)

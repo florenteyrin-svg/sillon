@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"time"
 	"strings"
 	"unicode"
 
@@ -33,17 +34,26 @@ func (a *API) importJellyfin(w http.ResponseWriter, r *http.Request, u *db.User)
 		jsonError(w, 500, err.Error())
 		return
 	}
-	var ids, missing []string
-	for i := len(songs) - 1; i >= 0; i-- { // oldest first, so the last favourite ends up on top
-		s := songs[i]
+	// Jellyfin does not say when a song was made a favourite: the date it was added to Jellyfin stands for
+	// it, so the Favoris playlist is in the order of addition, newest first, like the songs hearted in Sillon.
+	var ids []string
+	var at []int64
+	var missing []string
+	now := time.Now().Unix()
+	for i, s := range songs {
 		if id := a.matchSong(s, idx); id != "" {
 			ids = append(ids, id)
+			t := s.Added().Unix()
+			if s.Added().IsZero() || t > now {
+				t = now - int64(i) // unknown date: keep Jellyfin's order
+			}
+			at = append(at, t)
 		} else {
 			missing = append(missing, firstArtist(s)+" — "+s.Name)
 		}
 	}
-	for _, id := range ids {
-		if err := a.DB.Star(u.ID, []string{id}); err != nil {
+	for i, id := range ids {
+		if err := a.DB.StarAt(u.ID, id, at[i]); err != nil {
 			jsonError(w, 500, err.Error())
 			return
 		}

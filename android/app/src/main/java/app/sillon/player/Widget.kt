@@ -39,7 +39,8 @@ import kotlinx.coroutines.withContext
 object Widget {
     private const val ACTION = "app.sillon.widget.ACTION"
     private var art: Bitmap? = null
-    private var artKey: String? = null
+    private var artKey: String? = null // the art the bitmap above belongs to
+    private var wantedKey: String? = null // the art of the song playing, maybe still loading
 
     private val labelIds: IntArray by lazy {
         IntArray(108) { i -> R.id::class.java.getField("widget_label_$i").getInt(null) }
@@ -69,6 +70,7 @@ object Widget {
         if (ids.isEmpty()) return
 
         val meta = player.currentMediaItem?.mediaMetadata
+        val url = meta?.artworkUri?.toString()
         val v = RemoteViews(context.packageName, R.layout.widget_vinyl)
         v.setTextViewText(R.id.widget_title, meta?.title ?: "Sillon")
         v.setTextViewText(R.id.widget_artist, meta?.artist ?: "")
@@ -99,12 +101,13 @@ object Widget {
         if (logo != null) v.setImageViewResource(R.id.widget_quality, logo)
 
         // The card takes a dark colour from the album art (it is drawn white and tinted here)
-        val a = art
+        // Only the art of THIS song: never the previous one while the new one loads
+        val a = art?.takeIf { url != null && artKey == url }
         v.setInt(R.id.widget_background, "setColorFilter", a?.let { Artwork.backgroundColor(it) } ?: Artwork.defaultBackground(context))
 
         // Album art: still when paused, turning with the record while playing
         if (a != null) v.setImageViewBitmap(R.id.widget_art, Artwork.circle(a)) else v.setImageViewResource(R.id.widget_art, R.drawable.widget_ic_music)
-        val frames = if (playing && a != null) Artwork.rotatedLabelFiles(context, artKey ?: "", a, labelIds.size, 144) else null
+        val frames = if (playing && a != null) Artwork.readyLabelFiles(context, url!!, labelIds.size) else null
         v.setViewVisibility(R.id.widget_label_spinning, if (frames != null) View.VISIBLE else View.GONE)
         v.setViewVisibility(R.id.widget_art, if (frames != null) View.GONE else View.VISIBLE)
         frames?.forEachIndexed { i, uri -> v.setImageViewUri(labelIds[i], uri) }
@@ -120,15 +123,17 @@ object Widget {
         v.setOnClickPendingIntent(R.id.widget_tonearm, openApp(context))
         manager.updateAppWidget(ids, v)
 
-        val url = meta?.artworkUri?.toString()
-        if (url != null && url != artKey) {
-            artKey = url
+        if (url != null && url != wantedKey) {
+            wantedKey = url
             scope.launch {
                 val result = SingletonImageLoader.get(context).execute(
                     ImageRequest.Builder(context).data(url).size(300).allowHardware(false).build())
-                val bmp = result.image?.toBitmap() ?: return@launch
-                art = bmp
+                val bmp = result.image?.toBitmap()
+                if (bmp == null) { if (wantedKey == url) wantedKey = null; return@launch } // tried again on the next update
                 withContext(Dispatchers.IO) { Artwork.rotatedLabelFiles(context, url, bmp, labelIds.size, 144) }
+                if (wantedKey != url) return@launch // the song changed meanwhile
+                art = bmp
+                artKey = url
                 update(context, player, scope)
             }
         }
