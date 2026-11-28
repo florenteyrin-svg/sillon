@@ -16,8 +16,8 @@ import (
 )
 
 // Artist photos come from Apple Music (through à la carte), found by the artist's name, and are kept in
-// the data folder. An artist with no photo is asked again after a month.
-const artistNoPhotoRetry = 30 * 24 * time.Hour
+// the data folder. An artist with no photo on Apple Music is asked again after a week.
+const artistNoPhotoRetry = 7 * 24 * time.Hour
 
 var errNoPhoto = errors.New("no photo for this artist on Apple Music")
 
@@ -41,6 +41,7 @@ func (a *API) artistImage(w http.ResponseWriter, r *http.Request, u *db.User) {
 			return
 		}
 		if err := a.fetchArtistImage(id, dir, img); err != nil {
+			log.Printf("artist photo: %s: %v", id, err)
 			if errors.Is(err, errNoPhoto) { // not asked again for a month; a network problem is retried next time
 				os.MkdirAll(dir, 0o755)
 				os.WriteFile(none, nil, 0o644)
@@ -75,6 +76,10 @@ func (a *API) fetchArtistImage(id, dir, dest string) error {
 		if fold(name) != want {
 			continue
 		}
+		if _, ok := m["artworkTemplate"]; !ok {
+			// À la carte too old to give artist photos (rebuild it): not remembered as "no photo"
+			return fmt.Errorf("%s: à la carte gives no artist photos, rebuild it (docker compose up -d --build)", ar.Name)
+		}
 		if t, _ := m["artworkTemplate"].(string); t != "" { // Apple: ".../{w}x{h}bb.{f}"
 			url = strings.NewReplacer("{w}", "1400", "{h}", "1400", "{f}", "jpg", "{c}", "").Replace(t)
 		} else if u, _ := m["artworkUrlLarge"].(string); u != "" {
@@ -83,7 +88,7 @@ func (a *API) fetchArtistImage(id, dir, dest string) error {
 		break
 	}
 	if url == "" {
-		return errNoPhoto
+		return fmt.Errorf("%s: %w", ar.Name, errNoPhoto)
 	}
 	hc := &http.Client{Timeout: 30 * time.Second}
 	resp, err := hc.Get(url)
